@@ -90,6 +90,26 @@ async def test_classify_valid_document_request() -> None:
     assert result is IntentClass.VALID_DOCUMENT_REQUEST
 
 
+async def test_classify_general_topic_brief_maps_to_valid() -> None:
+    """A general-topic brief request maps through to ``valid_document_request`` (Req 1.3).
+
+    Documents that a request for a brief/briefing on a general (non-business)
+    topic resolves to :attr:`IntentClass.VALID_DOCUMENT_REQUEST` when the backend
+    scripts that intent. This exercises the fake backend only and does not assert
+    real-LLM classification behavior.
+    """
+
+    validator = _validator_returning(
+        _classification_json(
+            "valid_document_request", "asks for a brief on a topic"
+        )
+    )
+
+    result = await validator.classify("tell usa vs iran war in brief")
+
+    assert result is IntentClass.VALID_DOCUMENT_REQUEST
+
+
 async def test_classify_malicious() -> None:
     """A malicious request is classified ``malicious`` (Req 1.3)."""
 
