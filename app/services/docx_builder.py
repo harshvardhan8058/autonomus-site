@@ -184,8 +184,14 @@ class DocumentBuilder:
 
         document = Document()
 
+        # Compute the full ordered list of headings the document will render
+        # (real sections plus any synthesized "Summary"/"Key Points" sections)
+        # BEFORE the TOC is written, so the table of contents lists the actual
+        # document structure rather than a placeholder (Req 10.1).
+        toc_entries = self._compute_toc_entries(sections)
+
         self._add_cover_page(document, title=title, prepared_by=prepared_by)
-        self._add_table_of_contents(document)
+        self._add_table_of_contents(document, toc_entries)
 
         has_table = False
         has_bullets = False
@@ -242,21 +248,100 @@ class DocumentBuilder:
 
         document.add_page_break()
 
-    def _add_table_of_contents(self, document: Document) -> None:
-        """Insert a heading and a Word ``TOC`` field, then a page break (Req 10.1).
+    def _compute_toc_entries(
+        self, sections: Sequence[Mapping[str, Any]]
+    ) -> list[tuple[str, int]]:
+        """Compute the ordered ``(heading, level)`` list the document will render.
+
+        The result mirrors exactly what :meth:`build` renders: one entry per
+        supplied section (its heading text and normalized level), followed by the
+        synthesized ``Summary`` (level 2) section when no section provides a table
+        and the synthesized ``Key Points`` (level 2) section when no section
+        provides a bullet list. Computing this list up front lets the table of
+        contents list the real document structure (Req 10.1).
+
+        Args:
+            sections: The ordered section payloads that will be rendered.
+
+        Returns:
+            The ordered list of ``(heading_text, level)`` tuples, where ``level``
+            is always ``1`` or ``2``.
+        """
+
+        entries: list[tuple[str, int]] = []
+        has_table = False
+        has_bullets = False
+        for section in sections:
+            heading = str(section.get("heading", "") or "")
+            level = section.get("level", 1)
+            if level not in (1, 2):
+                level = 1
+            entries.append((heading, level))
+
+            bullets = section.get("bullets")
+            if isinstance(bullets, (list, tuple)) and bullets:
+                has_bullets = True
+
+            table = section.get("table")
+            if isinstance(table, Mapping):
+                headers = table.get("headers")
+                rows = table.get("rows")
+                if (
+                    isinstance(headers, (list, tuple))
+                    and headers
+                    and isinstance(rows, (list, tuple))
+                    and rows
+                ):
+                    has_table = True
+
+        # These mirror the synthesized sections build() appends to guarantee a
+        # table and a bullet list always exist (Req 10.1).
+        if not has_table:
+            entries.append(("Summary", 2))
+        if not has_bullets:
+            entries.append(("Key Points", 2))
+        return entries
+
+    def _add_table_of_contents(
+        self, document: Document, entries: Sequence[tuple[str, int]]
+    ) -> None:
+        """Insert a heading and a real, visible Word ``TOC`` field (Req 10.1).
+
+        The TOC is written as a proper complex field (``fldChar`` begin /
+        ``instrText`` / ``fldChar`` separate / cached result / ``fldChar`` end).
+        The cached "result" content is one visible paragraph per heading (the
+        actual heading text, indented for level-2 entries), rendered as normal
+        text runs so the table of contents is readable in every viewer — not just
+        those that auto-refresh fields. The ``w:updateFields`` settings flag
+        (set in :meth:`build`) still instructs Word to rebuild the real,
+        page-numbered TOC when the document is opened.
 
         Args:
             document: The document being assembled.
+            entries: The ordered ``(heading, level)`` list to render as the
+                cached TOC result.
         """
 
         self._add_styled_heading(document, "Table of Contents", level=1)
 
-        toc_paragraph = document.add_paragraph()
-        self._add_field(
-            toc_paragraph,
-            instruction=_TOC_INSTRUCTION,
-            cached_text="Right-click and choose 'Update Field' to build the table of contents.",
-        )
+        # Open the complex field: begin -> instruction -> separate.
+        field_paragraph = document.add_paragraph()
+        self._append_fld_char(field_paragraph, "begin")
+        self._append_instr_text(field_paragraph, _TOC_INSTRUCTION)
+        self._append_fld_char(field_paragraph, "separate")
+
+        # Cached result: one visible paragraph per heading so the TOC is readable
+        # in any viewer. The closing ``end`` fldChar is appended to the last
+        # rendered paragraph (or the opening paragraph when there are no entries).
+        last_paragraph = field_paragraph
+        for text, level in entries:
+            entry_paragraph = document.add_paragraph()
+            if level == 2:
+                entry_paragraph.paragraph_format.left_indent = Pt(18)
+            entry_paragraph.add_run(text)
+            last_paragraph = entry_paragraph
+
+        self._append_fld_char(last_paragraph, "end")
 
         document.add_page_break()
 
@@ -420,8 +505,10 @@ class DocumentBuilder:
     def _add_field(paragraph: Any, *, instruction: str, cached_text: str = "") -> None:
         """Append a simple Word field (``w:fldSimple``) to ``paragraph``.
 
-        Using a simple field lets ``python-docx`` embed dynamic fields (a TOC or a
-        page number) that Word evaluates when the document is opened.
+        Using a simple field lets ``python-docx`` embed a dynamic field (such as
+        the footer ``PAGE`` number) that Word evaluates when the document is
+        opened. The multi-paragraph TOC uses a complex field instead (see
+        :meth:`_append_fld_char`).
 
         Args:
             paragraph: The paragraph to append the field to.
@@ -437,6 +524,45 @@ class DocumentBuilder:
         run.append(text_element)
         fld_simple.append(run)
         paragraph._p.append(fld_simple)
+
+    @staticmethod
+    def _append_fld_char(paragraph: Any, fld_char_type: str) -> None:
+        """Append a complex-field ``w:fldChar`` run to ``paragraph``.
+
+        Complex fields (unlike ``w:fldSimple``) are delimited by ``begin``,
+        ``separate``, and ``end`` field characters, which lets a field's cached
+        result span its own runs and paragraphs — used here so the TOC result can
+        be a readable, multi-paragraph list of headings.
+
+        Args:
+            paragraph: The paragraph to append the field-character run to.
+            fld_char_type: The field-character type (``"begin"``, ``"separate"``
+                or ``"end"``).
+        """
+
+        run = OxmlElement("w:r")
+        fld_char = OxmlElement("w:fldChar")
+        fld_char.set(qn("w:fldCharType"), fld_char_type)
+        run.append(fld_char)
+        paragraph._p.append(run)
+
+    @staticmethod
+    def _append_instr_text(paragraph: Any, instruction: str) -> None:
+        """Append a ``w:instrText`` run carrying a complex-field instruction.
+
+        Args:
+            paragraph: The paragraph to append the instruction run to.
+            instruction: The field instruction text (e.g. the ``TOC`` spec). It
+                is written with ``xml:space="preserve"`` so its leading and
+                trailing spaces are retained.
+        """
+
+        run = OxmlElement("w:r")
+        instr_text = OxmlElement("w:instrText")
+        instr_text.set(qn("xml:space"), "preserve")
+        instr_text.text = instruction
+        run.append(instr_text)
+        paragraph._p.append(run)
 
     @staticmethod
     def _enable_update_fields(document: Document) -> None:

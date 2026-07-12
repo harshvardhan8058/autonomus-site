@@ -23,7 +23,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from app.agent.executor import Executor
+from app.agent.executor import Executor, humanize_section_title
 from app.agent.guardrail import GuardrailValidator
 from app.agent.planner import Planner, PlanningError
 from app.agent.reflector import Reflector
@@ -473,14 +473,18 @@ class Orchestrator:
 
         Returns:
             An ordered list of ``{"heading": ..., "body": ...}`` section mappings
-            for each completed step that produced an output summary.
+            for each completed step that produced an output summary. Headings are
+            human-readable, title-cased titles (never raw tool identifiers),
+            consistent with the Executor's section accumulation.
         """
 
         sections: list[dict[str, Any]] = []
         for step in sorted(steps, key=lambda s: s.step):
             summary = (step.output_summary or "").strip()
             if step.status is StepStatus.DONE and summary:
-                heading = (step.task or f"Step {step.step}").strip()
+                heading = humanize_section_title(
+                    step.task or "", step.description or "", step.step
+                )
                 sections.append({"heading": heading, "body": summary})
         return sections
 

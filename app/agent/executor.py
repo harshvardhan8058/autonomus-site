@@ -32,6 +32,7 @@ assembled sections to render into the final ``.docx`` deliverable.
 from __future__ import annotations
 
 import contextlib
+import re
 from pathlib import Path
 from typing import Any
 
@@ -61,6 +62,93 @@ _TOOL_RESEARCH = "research"
 _TOOL_DRAFT_SECTION = "draft_section"
 _TOOL_GENERATE_TABLE_DATA = "generate_table_data"
 _TOOL_BUILD_DOCX = "build_docx"
+
+# The set of registered tool identifiers that must never surface as a
+# user-visible section heading (they are internal routing names, not titles).
+_KNOWN_TOOL_NAMES = frozenset(
+    {_TOOL_RESEARCH, _TOOL_DRAFT_SECTION, _TOOL_GENERATE_TABLE_DATA, _TOOL_BUILD_DOCX}
+)
+
+# The maximum number of leading words kept when deriving a title from a
+# free-form step description.
+_TITLE_MAX_WORDS = 8
+
+# Delimiters that end the "leading clause" of a description when deriving a
+# concise section title from it.
+_CLAUSE_DELIMITERS = re.compile(r"[.;:\n]")
+
+
+def _title_case(text: str) -> str:
+    """Capitalize the first letter of each whitespace-separated word.
+
+    Unlike :meth:`str.title`, the remainder of each word is left untouched, so
+    embedded capitals and apostrophes (e.g. acronyms or ``don't``) are preserved.
+
+    Args:
+        text: The text to title-case.
+
+    Returns:
+        The title-cased text.
+    """
+
+    return " ".join(
+        word[:1].upper() + word[1:] if word else word for word in text.split()
+    )
+
+
+def _title_from_description(description: str) -> str:
+    """Derive a concise, title-cased heading from a step description.
+
+    Takes the leading clause of ``description`` (up to the first sentence/clause
+    delimiter), truncates it to :data:`_TITLE_MAX_WORDS` words, strips trailing
+    punctuation, and title-cases the result.
+
+    Args:
+        description: The free-form step description.
+
+    Returns:
+        A concise title-cased heading, or an empty string when ``description``
+        yields no usable text.
+    """
+
+    text = " ".join((description or "").split())
+    if not text:
+        return ""
+    clause = _CLAUSE_DELIMITERS.split(text, maxsplit=1)[0].strip() or text
+    words = clause.split()
+    if len(words) > _TITLE_MAX_WORDS:
+        clause = " ".join(words[:_TITLE_MAX_WORDS])
+    clause = clause.strip().rstrip(".,;:!?-\u2013\u2014")
+    return _title_case(clause) if clause.strip() else ""
+
+
+def humanize_section_title(task: str, description: str, index: int) -> str:
+    """Build a human-readable section heading from a plan step (Req 10.1).
+
+    Section headings must be professional, title-cased titles rather than the
+    raw internal tool identifiers used for routing. When ``task`` is a
+    meaningful, non-tool-name value it is title-cased (underscores become
+    spaces); when ``task`` is one of the known tool names or is empty, a concise
+    title is derived from ``description`` instead; failing that, a positional
+    ``"Section N"`` fallback is used.
+
+    Args:
+        task: The plan step's ``task`` value (may be a bare tool name).
+        description: The plan step's free-form description.
+        index: The 1-based position used for the ``"Section N"`` fallback.
+
+    Returns:
+        A non-empty, human-readable, title-cased section heading.
+    """
+
+    normalized_task = (task or "").strip()
+    if normalized_task and normalized_task not in _KNOWN_TOOL_NAMES:
+        return _title_case(normalized_task.replace("_", " "))
+
+    derived = _title_from_description(description)
+    if derived:
+        return derived
+    return f"Section {index}"
 
 # The default document title / prepared-by line used when building the .docx and
 # no better value can be derived from the Run state.
@@ -507,10 +595,11 @@ class Executor:
     ) -> None:
         """Append a section payload derived from a content step's result.
 
-        The section heading is taken from the tool result's ``title`` (when
-        provided) or the step's task/description; the body is the tool's textual
-        output; and a table is included when the result carries ``headers`` and
-        ``rows`` (as ``generate_table_data`` produces).
+        The section heading is a human-readable, title-cased title derived from
+        the step (never a raw tool identifier — see :func:`humanize_section_title`);
+        the body is the tool's textual output; and a table is included when the
+        result carries ``headers`` and ``rows`` (as ``generate_table_data``
+        produces).
 
         Args:
             step: The content step that produced ``result``.
@@ -519,11 +608,9 @@ class Executor:
         """
 
         data = result.data or {}
-        heading = ""
-        if isinstance(data, dict):
-            heading = str(data.get("title") or "")
-        if not heading:
-            heading = (step.task or step.description or f"Step {step.step}").strip()
+        heading = humanize_section_title(
+            step.task or "", step.description or "", step.step
+        )
 
         section: dict[str, Any] = {"heading": heading}
         if result.output:

@@ -148,9 +148,13 @@ def test_generated_documents_parse_and_contain_required_structure(
     paragraph_texts = [p.text for p in document.paragraphs]
     assert title in paragraph_texts
 
-    # A table-of-contents field element is present.
+    # A table-of-contents field element is present (the real TOC field
+    # instruction still carries the ``TOC`` switch).
     document_xml = document.element.xml
     assert "TOC" in document_xml
+    # The old, unhelpful placeholder is never emitted: the TOC now renders a
+    # visible, readable list of headings instead (Req 10.1).
+    assert "Right-click and choose" not in document_xml
 
     # At least one table exists.
     assert len(document.tables) >= 1
@@ -172,6 +176,53 @@ def test_generated_documents_parse_and_contain_required_structure(
     # The footer contains a page-number (PAGE) field.
     footer_xml = document.sections[0].footer._element.xml
     assert "PAGE" in footer_xml
+
+
+# --- TOC rendering (unit) ---------------------------------------------------
+
+
+def test_table_of_contents_lists_section_headings(tmp_path) -> None:
+    """The TOC renders a visible, readable list of the section headings (Req 10.1).
+
+    The table of contents must be visible in any viewer (not a placeholder that
+    depends on the reader refreshing fields). The cached TOC result therefore
+    contains one entry per document heading, so each heading appears both as its
+    real styled heading AND as a TOC entry. The old "Right-click…" placeholder
+    must be gone, and the field must remain a genuine Word ``TOC`` field.
+    """
+
+    builder = DocumentBuilder("1F4E79")
+    sections = [
+        {
+            "heading": "Market Analysis Overview",
+            "level": 1,
+            "body": "Body text.",
+            "bullets": ["A key point"],
+            "table": {"headers": ["Metric"], "rows": [["Value"]]},
+        },
+        {"heading": "Detailed Findings", "level": 2, "body": "More detail."},
+    ]
+
+    output_path = tmp_path / "toc.docx"
+    written = builder.build(
+        title="Quarterly Report",
+        prepared_by="Tester",
+        sections=sections,
+        output_path=output_path,
+    )
+
+    document = Document(str(written))
+    document_xml = document.element.xml
+
+    # The field is still a real Word TOC field, and the placeholder is gone.
+    assert "TOC" in document_xml
+    assert "Right-click and choose" not in document_xml
+
+    # Each heading appears twice: once as the styled heading, once as a visible
+    # TOC entry rendered as normal text.
+    paragraph_texts = [p.text for p in document.paragraphs]
+    assert paragraph_texts.count("Market Analysis Overview") >= 2
+    assert paragraph_texts.count("Detailed Findings") >= 2
 
 
 # --- Property 15 ------------------------------------------------------------
