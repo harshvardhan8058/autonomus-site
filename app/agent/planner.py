@@ -33,8 +33,17 @@ _SYSTEM_PROMPT = (
     "- Produce AT LEAST two steps, numbered sequentially starting at 1 "
     "(1, 2, 3, ...), each building toward the final document.\n"
     "- Each step MUST include: 'step' (integer), 'task' (short name), "
-    "'description' (what the step does), and 'expected_output' (what the step "
-    "produces).\n"
+    "'description' (what the step does), 'expected_output' (what the step "
+    "produces), and 'section_title' (see below).\n"
+    "- 'task' is the INTERNAL action/tool intent the executor dispatches on; "
+    "'section_title' is the HEADING that appears in the finished Word document. "
+    "For every content step, 'section_title' MUST be a concise, professional, "
+    "title-case document section heading of 2-6 words (for example 'Executive "
+    "Summary', 'Cloud CRM Overview', 'On-Premise vs Cloud Comparison', "
+    "'Technical Requirements', 'Migration Plan', 'Cost Analysis'). Do NOT copy "
+    "the verbose task/description into 'section_title'. For a build_docx or "
+    "other assembly step that produces no heading, 'section_title' may be an "
+    "empty string.\n"
     "- Prefer tool-oriented tasks so the executor can dispatch them. Use these "
     "tool names where appropriate: 'research' (gather facts on a topic), "
     "'draft_section' (write a document section from a title and context), "
@@ -47,8 +56,9 @@ _SYSTEM_PROMPT = (
     "decision as a string in the top-level 'assumptions' list. When the request "
     "is unambiguous, 'assumptions' may be an empty list.\n\n"
     "Respond with a single strict-JSON object matching this shape:\n"
-    '{"steps": [{"step": 1, "task": "...", "description": "...", '
-    '"expected_output": "..."}, ...], "assumptions": ["..."]}'
+    '{"steps": [{"step": 1, "task": "...", "section_title": "...", '
+    '"description": "...", "expected_output": "..."}, ...], '
+    '"assumptions": ["..."]}'
 )
 
 

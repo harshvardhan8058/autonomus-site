@@ -23,7 +23,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from app.agent.executor import Executor, humanize_section_title
+from app.agent.executor import Executor, section_heading_for_step
 from app.agent.guardrail import GuardrailValidator
 from app.agent.planner import Planner, PlanningError
 from app.agent.reflector import Reflector
@@ -443,6 +443,18 @@ class Orchestrator:
             sections = self._collect_sections(plan.steps)
             if not sections:
                 return
+            assumptions = [
+                str(assumption).strip()
+                for assumption in (run_state.assumptions or [])
+                if str(assumption).strip()
+            ]
+            if assumptions:
+                # Surface the agent's assumptions as a genuine bullet list rather
+                # than duplicating the section headings (consistent with the
+                # Executor's build_docx assembly).
+                sections.append(
+                    {"heading": "Key Assumptions", "bullets": assumptions}
+                )
             output_path = Path(_OUTPUT_DIR) / f"agent-run-{run_state.run_id}.docx"
             built = self._doc_builder.build(
                 title=self._derive_title(run_state),
@@ -482,9 +494,7 @@ class Orchestrator:
         for step in sorted(steps, key=lambda s: s.step):
             summary = (step.output_summary or "").strip()
             if step.status is StepStatus.DONE and summary:
-                heading = humanize_section_title(
-                    step.task or "", step.description or "", step.step
-                )
+                heading = section_heading_for_step(step, step.step)
                 sections.append({"heading": heading, "body": summary})
         return sections
 
