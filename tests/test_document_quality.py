@@ -170,10 +170,12 @@ def test_docx_headings_equal_section_titles_and_toc_lists_them(
     assert "The audience is executive leadership." in bullet_texts
 
     # The table of contents lists the real section headings (each heading appears
-    # both as its styled heading and as a visible TOC entry).
+    # both as its styled heading and as a visible TOC entry). TOC entry text now
+    # also carries a tab and a page number, so use substring (not exact-count)
+    # matching.
     paragraph_texts = [p.text for p in document.paragraphs]
-    assert paragraph_texts.count("Cloud CRM Overview") >= 2
-    assert paragraph_texts.count("On-Premise vs Cloud Comparison") >= 2
+    assert sum(1 for t in paragraph_texts if "Cloud CRM Overview" in t) >= 2
+    assert sum(1 for t in paragraph_texts if "On-Premise vs Cloud Comparison" in t) >= 2
 
 
 # ---------------------------------------------------------------------------

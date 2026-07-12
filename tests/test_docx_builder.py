@@ -79,6 +79,51 @@ def _sections(draw: st.DrawFn) -> list[dict]:
     return draw(st.lists(section_strategy, max_size=4))
 
 
+def _section_supplies_table(section: dict) -> bool:
+    """Return whether ``section`` supplies real tabular data.
+
+    Mirrors the builder's rule for rendering a table: a valid ``table`` payload
+    (non-empty ``headers`` and ``rows``) or a markdown pipe-table in the body (a
+    header row immediately followed by a dashes/colons separator row). No table
+    is fabricated, so the built document contains a table only when this holds
+    for at least one section.
+    """
+
+    table = section.get("table")
+    if isinstance(table, dict):
+        headers = table.get("headers")
+        rows = table.get("rows")
+        if (
+            isinstance(headers, (list, tuple))
+            and headers
+            and isinstance(rows, (list, tuple))
+            and rows
+        ):
+            return True
+
+    body = section.get("body")
+    if isinstance(body, str) and body:
+        import re as _re
+
+        separator = _re.compile(r"^:?-{1,}:?$")
+        lines = [line.strip() for line in body.split("\n")]
+        for index in range(len(lines) - 1):
+            first, second = lines[index], lines[index + 1]
+            if not (first.startswith("|") and first.endswith("|")):
+                continue
+            if not (second.startswith("|") and second.endswith("|")):
+                continue
+            header_cells = [c.strip() for c in first.split("|")[1:-1]]
+            sep_cells = [c.strip() for c in second.split("|")[1:-1]]
+            if (
+                header_cells
+                and sep_cells
+                and all(separator.fullmatch(cell) is not None for cell in sep_cells)
+            ):
+                return True
+    return False
+
+
 def _valid_hex() -> st.SearchStrategy[str]:
     """Generate valid 6-digit hex colors, some with a leading ``#``."""
 
@@ -124,8 +169,10 @@ def test_generated_documents_parse_and_contain_required_structure(
 
     For arbitrary section inputs, the ``.docx`` produced by
     :class:`DocumentBuilder` re-opens successfully with ``python-docx`` and
-    contains the document title, a TOC field element, at least one table, at
-    least one bullet-list paragraph, styled headings, and a footer ``PAGE`` field.
+    contains the document title, a TOC field element, at least one bullet-list
+    paragraph, styled headings, and a footer ``PAGE`` field. A table is present
+    only when at least one section supplies real tabular data; no table is
+    fabricated, so a document may legitimately contain zero tables.
     """
 
     output_path = tmp_path_factory.mktemp("docx") / "deliverable.docx"
@@ -156,8 +203,13 @@ def test_generated_documents_parse_and_contain_required_structure(
     # visible, readable list of headings instead (Req 10.1).
     assert "Right-click and choose" not in document_xml
 
-    # At least one table exists.
-    assert len(document.tables) >= 1
+    # A table is rendered only when a section supplies real tabular data; no
+    # table is fabricated. When no section supplies one, zero tables is valid.
+    expected_table = any(_section_supplies_table(section) for section in sections)
+    if expected_table:
+        assert len(document.tables) >= 1
+    else:
+        assert len(document.tables) == 0
 
     # At least one bullet-list paragraph exists.
     bullet_paragraphs = [
@@ -218,11 +270,97 @@ def test_table_of_contents_lists_section_headings(tmp_path) -> None:
     assert "TOC" in document_xml
     assert "Right-click and choose" not in document_xml
 
-    # Each heading appears twice: once as the styled heading, once as a visible
-    # TOC entry rendered as normal text.
+    # Each heading appears at least twice: once as the styled heading, once
+    # inside a visible TOC entry. The TOC entry text now also carries a tab and a
+    # page number, so use substring (not exact-equality) matching.
     paragraph_texts = [p.text for p in document.paragraphs]
-    assert paragraph_texts.count("Market Analysis Overview") >= 2
-    assert paragraph_texts.count("Detailed Findings") >= 2
+    assert sum(1 for t in paragraph_texts if "Market Analysis Overview" in t) >= 2
+    assert sum(1 for t in paragraph_texts if "Detailed Findings" in t) >= 2
+
+    # The cached TOC entries are backed by PAGEREF fields (so Word fills in exact
+    # pages on open) and show a visible page number with a dotted leader tab.
+    assert "PAGEREF" in document_xml
+    assert "w:tab" in document_xml
+    # A visible cached page number appears in a TOC entry (content starts on
+    # page 2, so the first entry shows "2").
+    toc_entry_texts = [
+        t
+        for t in paragraph_texts
+        if "Market Analysis Overview" in t or "Detailed Findings" in t
+    ]
+    assert any(any(ch.isdigit() for ch in t) for t in toc_entry_texts)
+
+
+def test_no_table_is_fabricated_when_no_section_supplies_one(tmp_path) -> None:
+    """No table is synthesized when no section supplies tabular data (Req 10.1).
+
+    The builder previously fabricated a "Summary" section with a Section/Status
+    table to satisfy an unconditional ">=1 table" guarantee. That fabrication is
+    removed: when no section provides a ``table`` payload or a body markdown
+    table, the document contains ZERO tables and no synthesized "Summary" heading.
+    """
+
+    sections = [
+        {"heading": "Introduction", "level": 1, "body": "Some plain body text."},
+        {"heading": "Details", "level": 2, "body": "More narrative prose."},
+    ]
+
+    output_path = tmp_path / "no_table.docx"
+    builder = DocumentBuilder("1F4E79")
+    written = builder.build(
+        title="No Table Report",
+        prepared_by="Tester",
+        sections=sections,
+        output_path=output_path,
+    )
+
+    document = Document(str(written))
+
+    # The fabricated Section/Status "Summary" table is gone entirely.
+    assert len(document.tables) == 0
+    paragraph_texts = [p.text for p in document.paragraphs]
+    assert "Summary" not in paragraph_texts
+
+
+def test_toc_entries_show_page_numbers_with_pageref_fields(tmp_path) -> None:
+    """TOC entries render page numbers backed by PAGEREF fields (Req 10.1).
+
+    Each cached TOC entry shows the heading, a dotted leader tab, and a page
+    number produced by a ``PAGEREF`` field targeting a bookmark on the matching
+    section heading, so Word fills in exact pages on open while a number stays
+    visible in non-refreshing viewers.
+    """
+
+    sections = [
+        {"heading": "First Section", "level": 1, "body": "Body.", "bullets": ["x"]},
+        {"heading": "Second Section", "level": 2, "body": "More."},
+    ]
+
+    output_path = tmp_path / "toc_pages.docx"
+    builder = DocumentBuilder("1F4E79")
+    written = builder.build(
+        title="Paged Report",
+        prepared_by="Tester",
+        sections=sections,
+        output_path=output_path,
+    )
+
+    document = Document(str(written))
+    document_xml = document.element.xml
+
+    # PAGEREF fields target the heading bookmarks, and bookmarks are emitted for
+    # the section headings so the references resolve.
+    assert "PAGEREF" in document_xml
+    assert "_Toc_0" in document_xml
+    assert "w:bookmarkStart" in document_xml
+
+    # A TOC entry paragraph carries the heading text plus a visible page number.
+    toc_entry_texts = [
+        p.text
+        for p in document.paragraphs
+        if "First Section" in p.text and any(ch.isdigit() for ch in p.text)
+    ]
+    assert toc_entry_texts, "expected a TOC entry with a visible page number"
 
 
 # --- Property 15 ------------------------------------------------------------
@@ -455,8 +593,9 @@ def test_cover_and_toc_share_first_page_single_page_break(tmp_path) -> None:
     assert saw_break
 
     # The cover block and the TOC entries all appear before the first content
-    # section begins on the next page.
+    # section begins on the next page. TOC entry text now includes a tab and a
+    # page number, so match the heading text as a substring.
     assert "Pagination Report" in texts_before_break
     assert any("Prepared by:" in t for t in texts_before_break)
-    assert "Table of Contents" in texts_before_break
-    assert "First Section" in texts_before_break
+    assert any("Table of Contents" in t for t in texts_before_break)
+    assert any("First Section" in t for t in texts_before_break)

@@ -12,12 +12,18 @@ Every generated document contains (Req 10.1):
   followed by a thin divider and the table of contents on the same first page
   (a single page break after the TOC starts the first content section);
 - a **table of contents** inserted as a Word ``TOC`` field, with the document
-  settings ``w:updateFields`` flag set so Word refreshes the field on open;
+  settings ``w:updateFields`` flag set so Word refreshes the field on open. Each
+  cached TOC entry renders as a real TOC line: the heading text, a dotted tab
+  leader, and a right-aligned page number backed by a ``PAGEREF`` field that
+  targets a bookmark on the corresponding section heading;
 - **styled headings** (``Heading 1``/``Heading 2``) whose run font color is the
   resolved theme color;
 - **body text** paragraphs;
-- at least one **formatted table** (header row plus one or more data rows, using
-  the visible ``Table Grid`` style);
+- a **formatted table** (header row plus one or more data rows, using the
+  visible ``Table Grid`` style) whenever a section actually supplies tabular
+  data (``table`` payload or a markdown pipe-table in its body). No table is
+  synthesized when none is supplied, so a document may legitimately contain zero
+  tables;
 - at least one **bullet list** (``List Bullet`` style); and
 - a **footer** containing a page-number (``PAGE``) field.
 
@@ -37,10 +43,10 @@ from pathlib import Path
 from typing import Any
 
 from docx import Document
-from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_TAB_ALIGNMENT, WD_TAB_LEADER
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-from docx.shared import Pt, RGBColor
+from docx.shared import Inches, Pt, RGBColor
 
 from app.core.logging import StructuredLogger
 
@@ -151,6 +157,9 @@ class DocumentBuilder:
         """
 
         self._logger = logger
+        # Monotonic counter giving each heading bookmark a unique ``w:id``; reset
+        # at the start of every :meth:`build` since each build is a fresh document.
+        self._bookmark_id = 0
         normalized = _normalize_hex_color(theme_color) if isinstance(theme_color, str) else None
         if normalized is None:
             if self._logger is not None:
@@ -181,11 +190,19 @@ class DocumentBuilder:
         """Assemble a ``.docx`` deliverable and return the written path (Req 10.1).
 
         The produced document always contains a cover page, a table-of-contents
-        field, at least one styled heading, at least one formatted table, at
-        least one bullet list, and a footer page-number field. Missing keys in a
-        section mapping are tolerated, and required structural elements are
-        synthesized when the supplied sections do not provide them, so the
-        structural guarantees hold for any input.
+        field, at least one styled heading, at least one bullet list, and a
+        footer page-number field. A formatted table is rendered only when a
+        section actually supplies tabular data (a ``table`` payload or a markdown
+        pipe-table in its body); no table is fabricated when none is supplied, so
+        the document may legitimately contain zero tables. Missing keys in a
+        section mapping are tolerated, and the bullet-list element is synthesized
+        when the supplied sections do not provide one, so that structural
+        guarantee holds for any input.
+
+        Each cached TOC entry is backed by a ``PAGEREF`` field targeting a
+        bookmark placed on the corresponding rendered section heading; the TOC
+        entries and bookmarked headings are emitted in the same order and count
+        so the page references line up.
 
         Args:
             title: The document title rendered on the cover page.
@@ -203,29 +220,36 @@ class DocumentBuilder:
 
         document = Document()
 
+        # Each build produces a fresh document, so reset the bookmark id counter
+        # used to give every section-heading bookmark a unique ``w:id``.
+        self._bookmark_id = 0
+
         # Compute the full ordered list of headings the document will render
-        # (real sections plus any synthesized "Summary"/"Key Considerations"
-        # sections) BEFORE the TOC is written, so the table of contents lists the
-        # actual document structure rather than a placeholder (Req 10.1).
+        # (real sections plus any synthesized "Key Considerations" section)
+        # BEFORE the TOC is written, so the table of contents lists the actual
+        # document structure rather than a placeholder (Req 10.1). Each entry's
+        # position is its bookmark index, so section headings can be tagged with
+        # matching bookmarks that the TOC ``PAGEREF`` fields target.
         toc_entries = self._compute_toc_entries(sections)
 
         self._add_cover_page(document, title=title, prepared_by=prepared_by)
         self._add_table_of_contents(document, toc_entries)
 
-        has_table = False
         has_bullets = False
-        for section in sections:
-            rendered_table, rendered_bullets = self._add_section(document, section)
-            has_table = has_table or rendered_table
+        for index, section in enumerate(sections):
+            _rendered_table, rendered_bullets = self._add_section(
+                document, section, bookmark_name=f"_Toc_{index}"
+            )
             has_bullets = has_bullets or rendered_bullets
 
-        # Guarantee at least one formatted table exists overall (Req 10.1).
-        if not has_table:
-            self._add_summary_table(document, sections)
-
-        # Guarantee at least one bullet list exists overall (Req 10.1).
+        # Guarantee at least one bullet list exists overall (Req 10.1). A table
+        # is intentionally NOT synthesized: it is rendered only when a section
+        # supplies real tabular data (owner-directed relaxation of the earlier
+        # unconditional ">=1 table" guarantee).
         if not has_bullets:
-            self._add_default_bullets(document, sections)
+            self._add_default_bullets(
+                document, sections, bookmark_name=f"_Toc_{len(sections)}"
+            )
 
         self._add_footer_page_number(document)
         self._enable_update_fields(document)
@@ -285,10 +309,12 @@ class DocumentBuilder:
 
         The result mirrors exactly what :meth:`build` renders: one entry per
         supplied section (its heading text and normalized level), followed by the
-        synthesized ``Summary`` (level 2) section when no section provides a table
-        and the synthesized ``Key Considerations`` (level 2) section when no
-        section provides a bullet list. Computing this list up front lets the
-        table of contents list the real document structure (Req 10.1).
+        synthesized ``Key Considerations`` (level 2) section when no section
+        provides a bullet list. No ``Summary`` entry is synthesized: a table is
+        rendered only when a section supplies real tabular data, never
+        fabricated. Computing this list up front lets the table of contents list
+        the real document structure (Req 10.1) and lets each entry's position
+        serve as the bookmark index shared with the rendered section headings.
 
         Args:
             sections: The ordered section payloads that will be rendered.
@@ -299,7 +325,6 @@ class DocumentBuilder:
         """
 
         entries: list[tuple[str, int]] = []
-        has_table = False
         has_bullets = False
         for section in sections:
             heading = str(section.get("heading", "") or "")
@@ -312,22 +337,9 @@ class DocumentBuilder:
             if isinstance(bullets, (list, tuple)) and bullets:
                 has_bullets = True
 
-            table = section.get("table")
-            if isinstance(table, Mapping):
-                headers = table.get("headers")
-                rows = table.get("rows")
-                if (
-                    isinstance(headers, (list, tuple))
-                    and headers
-                    and isinstance(rows, (list, tuple))
-                    and rows
-                ):
-                    has_table = True
-
-        # These mirror the synthesized sections build() appends to guarantee a
-        # table and a bullet list always exist (Req 10.1).
-        if not has_table:
-            entries.append(("Summary", 2))
+        # This mirrors the synthesized bullet section build() appends to
+        # guarantee a bullet list always exists (Req 10.1). No table entry is
+        # synthesized -- tables are rendered only from real data.
         if not has_bullets:
             entries.append(("Key Considerations", 2))
         return entries
@@ -339,12 +351,18 @@ class DocumentBuilder:
 
         The TOC is written as a proper complex field (``fldChar`` begin /
         ``instrText`` / ``fldChar`` separate / cached result / ``fldChar`` end).
-        The cached "result" content is one visible paragraph per heading (the
-        actual heading text, indented for level-2 entries), rendered as normal
-        text runs so the table of contents is readable in every viewer — not just
-        those that auto-refresh fields. The ``w:updateFields`` settings flag
-        (set in :meth:`build`) still instructs Word to rebuild the real,
+        The cached "result" content is one visible paragraph per heading rendered
+        as a real TOC line: the heading text on the left, a dotted tab leader, and
+        a right-aligned page number produced by a ``PAGEREF`` complex field that
+        targets a bookmark on the corresponding section heading. Level-2 entries
+        are indented. Each ``PAGEREF`` also carries a cached, best-effort page
+        number so a number is visible even in viewers that do not refresh fields;
+        the ``w:updateFields`` settings flag (set in :meth:`build`) instructs Word
+        to replace the cached numbers with exact pages and rebuild the real,
         page-numbered TOC when the document is opened.
+
+        The entries are emitted in the same order as the bookmarked section
+        headings, so entry ``i`` targets bookmark ``_Toc_{i}`` (Req 10.1).
 
         Args:
             document: The document being assembled.
@@ -361,14 +379,30 @@ class DocumentBuilder:
         self._append_fld_char(field_paragraph, "separate")
 
         # Cached result: one visible paragraph per heading so the TOC is readable
-        # in any viewer. The closing ``end`` fldChar is appended to the last
-        # rendered paragraph (or the opening paragraph when there are no entries).
+        # in any viewer. Each line shows the heading, a dotted leader tab, and a
+        # PAGEREF-backed page number. The closing ``end`` fldChar is appended to
+        # the last rendered paragraph (or the opening paragraph when there are no
+        # entries).
         last_paragraph = field_paragraph
-        for text, level in entries:
+        for index, (text, level) in enumerate(entries):
             entry_paragraph = document.add_paragraph()
             if level == 2:
                 entry_paragraph.paragraph_format.left_indent = Pt(18)
+            # A right-aligned tab stop with a dotted leader near the right margin
+            # produces the classic "heading .... page" TOC line.
+            entry_paragraph.paragraph_format.tab_stops.add_tab_stop(
+                Inches(6.0), WD_TAB_ALIGNMENT.RIGHT, WD_TAB_LEADER.DOTS
+            )
             entry_paragraph.add_run(text)
+            entry_paragraph.add_run("\t")
+            # Content starts on page 2 (cover + TOC share page 1), so number the
+            # entries monotonically 2, 3, 4, ... as a best-effort cached estimate;
+            # Word overwrites these with exact page numbers on open.
+            self._append_pageref_field(
+                entry_paragraph,
+                bookmark_name=f"_Toc_{index}",
+                cached_text=str(index + 2),
+            )
             last_paragraph = entry_paragraph
 
         self._append_fld_char(last_paragraph, "end")
@@ -380,13 +414,20 @@ class DocumentBuilder:
     # ------------------------------------------------------------------
 
     def _add_section(
-        self, document: Document, section: Mapping[str, Any]
+        self,
+        document: Document,
+        section: Mapping[str, Any],
+        *,
+        bookmark_name: str | None = None,
     ) -> tuple[bool, bool]:
         """Render a single section, tolerating missing keys.
 
         Args:
             document: The document being assembled.
             section: The section payload mapping.
+            bookmark_name: The bookmark name to wrap the section heading with so a
+                TOC ``PAGEREF`` field can target it. When ``None``, no bookmark is
+                emitted.
 
         Returns:
             A ``(rendered_table, rendered_bullets)`` tuple indicating whether this
@@ -397,7 +438,9 @@ class DocumentBuilder:
         level = section.get("level", 1)
         if level not in (1, 2):
             level = 1
-        self._add_styled_heading(document, heading, level=level)
+        self._add_styled_heading(
+            document, heading, level=level, bookmark_name=bookmark_name
+        )
 
         body = section.get("body")
         if body:
@@ -726,20 +769,35 @@ class DocumentBuilder:
     # ------------------------------------------------------------------
 
     def _add_styled_heading(
-        self, document: Document, text: str, *, level: int
+        self,
+        document: Document,
+        text: str,
+        *,
+        level: int,
+        bookmark_name: str | None = None,
     ) -> None:
         """Add a ``Heading {level}`` whose runs use the theme color (Req 10.1).
+
+        When ``bookmark_name`` is provided, the heading's content is wrapped in a
+        Word bookmark so a table-of-contents ``PAGEREF`` field can target it. Only
+        real document section headings (those that appear as TOC entries) are
+        bookmarked; the "Table of Contents" heading itself and in-body markdown
+        sub-headings pass ``None`` and are not bookmarked.
 
         Args:
             document: The document being assembled.
             text: The heading text.
             level: The heading level (1 or 2).
+            bookmark_name: The unique, stable bookmark name to wrap the heading
+                with, or ``None`` to emit no bookmark.
         """
 
         heading = document.add_heading(text, level=level)
         theme_rgb = RGBColor.from_string(self.theme_color)
         for run in heading.runs:
             run.font.color.rgb = theme_rgb
+        if bookmark_name is not None:
+            self._add_bookmark(heading, bookmark_name)
 
     def _add_table(
         self,
@@ -769,28 +827,12 @@ class DocumentBuilder:
                 value = row[index] if index < len(row) else ""
                 cells[index].text = str(value)
 
-    def _add_summary_table(
-        self, document: Document, sections: Sequence[Mapping[str, Any]]
-    ) -> None:
-        """Synthesize a small summary table so a table always exists (Req 10.1).
-
-        Args:
-            document: The document being assembled.
-            sections: The section payloads used to derive summary rows.
-        """
-
-        self._add_styled_heading(document, "Summary", level=2)
-        headers = ["Section", "Status"]
-        rows: list[list[str]] = []
-        for index, section in enumerate(sections, start=1):
-            heading = str(section.get("heading", "") or f"Section {index}")
-            rows.append([heading, "Included"])
-        if not rows:
-            rows.append(["Deliverable", "Generated"])
-        self._add_table(document, headers, rows)
-
     def _add_default_bullets(
-        self, document: Document, sections: Sequence[Mapping[str, Any]]
+        self,
+        document: Document,
+        sections: Sequence[Mapping[str, Any]],
+        *,
+        bookmark_name: str | None = None,
     ) -> None:
         """Synthesize a bullet list so a bullet list always exists (Req 10.1).
 
@@ -804,10 +846,14 @@ class DocumentBuilder:
             document: The document being assembled.
             sections: The section payloads (unused; the fallback is a fixed,
                 sensible default independent of the section headings).
+            bookmark_name: The bookmark name to wrap the "Key Considerations"
+                heading with so its TOC ``PAGEREF`` entry can target it.
         """
 
         del sections  # The default bullets are intentionally content-independent.
-        self._add_styled_heading(document, "Key Considerations", level=2)
+        self._add_styled_heading(
+            document, "Key Considerations", level=2, bookmark_name=bookmark_name
+        )
         points = [
             "Objectives and scope are defined above.",
             "Recommendations are detailed in the sections above.",
@@ -877,6 +923,62 @@ class DocumentBuilder:
         fld_char.set(qn("w:fldCharType"), fld_char_type)
         run.append(fld_char)
         paragraph._p.append(run)
+
+    def _add_bookmark(self, paragraph: Any, name: str) -> None:
+        """Wrap ``paragraph``'s content in a Word bookmark named ``name``.
+
+        Emits a ``w:bookmarkStart`` (carrying a unique, incrementing ``w:id`` and
+        the given ``name``) immediately after the paragraph properties and a
+        matching ``w:bookmarkEnd`` at the end of the paragraph, so the bookmark
+        brackets the heading's runs. A TOC ``PAGEREF`` field targeting ``name``
+        then resolves to the bookmarked heading's page.
+
+        Args:
+            paragraph: The heading paragraph to bookmark.
+            name: The unique, stable bookmark name (e.g. ``"_Toc_0"``).
+        """
+
+        bookmark_id = str(self._bookmark_id)
+        self._bookmark_id += 1
+
+        start = OxmlElement("w:bookmarkStart")
+        start.set(qn("w:id"), bookmark_id)
+        start.set(qn("w:name"), name)
+
+        end = OxmlElement("w:bookmarkEnd")
+        end.set(qn("w:id"), bookmark_id)
+
+        paragraph_element = paragraph._p
+        properties = paragraph_element.find(qn("w:pPr"))
+        if properties is not None:
+            properties.addnext(start)
+        else:
+            paragraph_element.insert(0, start)
+        paragraph_element.append(end)
+
+    def _append_pageref_field(
+        self, paragraph: Any, *, bookmark_name: str, cached_text: str
+    ) -> None:
+        """Append a ``PAGEREF`` complex field targeting ``bookmark_name``.
+
+        The field is written as ``fldChar`` begin -> ``instrText``
+        (`` PAGEREF <name> \\h ``) -> ``fldChar`` separate -> a cached page-number
+        text run -> ``fldChar`` end. Word replaces the cached number with the
+        exact page of the bookmarked heading when the document is opened (the
+        ``w:updateFields`` flag is set), while the cached number keeps a value
+        visible in viewers that do not refresh fields.
+
+        Args:
+            paragraph: The TOC entry paragraph to append the field to.
+            bookmark_name: The name of the bookmark on the target heading.
+            cached_text: The best-effort cached page number shown until refresh.
+        """
+
+        self._append_fld_char(paragraph, "begin")
+        self._append_instr_text(paragraph, f" PAGEREF {bookmark_name} \\h ")
+        self._append_fld_char(paragraph, "separate")
+        paragraph.add_run(cached_text)
+        self._append_fld_char(paragraph, "end")
 
     @staticmethod
     def _append_instr_text(paragraph: Any, instruction: str) -> None:
