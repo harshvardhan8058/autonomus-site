@@ -116,28 +116,25 @@ def test_plan_accepts_sequential_steps(plan: Plan) -> None:
     n=st.integers(min_value=2, max_value=8),
     data=st.data(),
 )
-def test_plan_rejects_non_sequential_steps(n: int, data: st.DataObject) -> None:
-    """Property 4 (rejection): non-sequential numbering is rejected.
+def test_plan_normalizes_non_sequential_steps(n: int, data: st.DataObject) -> None:
+    """Property 4 (normalization): arbitrary numbering is normalized to 1..n.
 
     **Validates: Requirements 2.1**
 
-    For any plan of ``n >= 2`` steps whose numbering is perturbed away from the
-    exact sequence ``1..n``, construction raises a ``ValidationError``.
+    For any plan of ``n >= 2`` steps whose incoming numbering is shuffled,
+    duplicated, or arbitrary, construction succeeds and the resulting step
+    numbers are reassigned to the exact sequence ``1..n`` in list order (the
+    guarantee is now upheld by normalization rather than rejection).
     """
 
-    numbers = list(range(1, n + 1))
-    # Perturb the numbering so it is guaranteed not to equal 1..n in order.
-    strategy = st.one_of(
-        # Swap two distinct positions.
-        st.tuples(
-            st.integers(min_value=0, max_value=n - 1),
-            st.integers(min_value=0, max_value=n - 1),
-        ).filter(lambda ij: ij[0] != ij[1]),
+    # Draw arbitrary (possibly shuffled/duplicated/zero) incoming step numbers.
+    incoming = data.draw(
+        st.lists(
+            st.integers(min_value=0, max_value=20),
+            min_size=n,
+            max_size=n,
+        )
     )
-    i, j = data.draw(strategy)
-    perturbed = numbers.copy()
-    perturbed[i], perturbed[j] = perturbed[j], perturbed[i]
-    assert perturbed != numbers  # guaranteed by distinct swap of distinct values
 
     steps = [
         PlanStep(
@@ -146,10 +143,34 @@ def test_plan_rejects_non_sequential_steps(n: int, data: st.DataObject) -> None:
             description="d",
             expected_output="e",
         )
-        for num in perturbed
+        for num in incoming
     ]
-    with pytest.raises(ValidationError):
-        Plan(steps=steps)
+    plan = Plan(steps=steps)
+    assert [s.step for s in plan.steps] == list(range(1, len(steps) + 1))
+
+
+def test_plan_tolerates_missing_step_fields() -> None:
+    """A Plan built from steps missing content fields validates and renumbers.
+
+    **Validates: Requirements 2.1**
+
+    ``PlanStep`` now defaults ``step``, ``task``, ``description``, and
+    ``expected_output``, so a plan whose steps omit these still validates. The
+    ``Plan`` validator then normalizes the step numbers to ``1..n``.
+    """
+
+    steps = [
+        PlanStep(),  # everything defaulted (step=0, empty strings)
+        PlanStep(task="research"),  # missing description/expected_output/step
+        PlanStep(step=99, description="draft"),  # arbitrary step number
+    ]
+    plan = Plan(steps=steps)
+
+    assert [s.step for s in plan.steps] == [1, 2, 3]
+    assert plan.steps[0].task == ""
+    assert plan.steps[0].description == ""
+    assert plan.steps[0].expected_output == ""
+    assert plan.steps[1].task == "research"
 
 
 # --- Property 5 -------------------------------------------------------------

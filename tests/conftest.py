@@ -85,6 +85,7 @@ class FakeLLMBackend:
         self.reachable = reachable
         self.call_count = 0
         self.health_calls = 0
+        self.last_json_mode: bool | None = None
 
     async def complete(
         self,
@@ -93,10 +94,17 @@ class FakeLLMBackend:
         system: str | None,
         temperature: float,
         max_tokens: int,
+        json_mode: bool = False,
     ) -> str:
-        """Return the next canned completion, or raise per the fail policy."""
+        """Return the next canned completion, or raise per the fail policy.
+
+        The ``json_mode`` flag is recorded on :attr:`last_json_mode` (and
+        otherwise ignored) so the fake still satisfies the ``LLMBackend``
+        protocol and tests can assert how it was invoked.
+        """
 
         self.call_count += 1
+        self.last_json_mode = json_mode
         if self._always_fail:
             raise self._exc_factory()
         if self._fail_times > 0:

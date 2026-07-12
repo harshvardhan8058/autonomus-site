@@ -320,6 +320,37 @@ async def test_health_reports_active_backend_reachability() -> None:
     assert groq.health_calls == 1
 
 
+async def test_complete_json_invokes_backend_with_json_mode() -> None:
+    """``complete_json`` calls the backend with native JSON mode enabled."""
+
+    settings_ = Settings(GROQ_API_KEY="test-key")
+    payload = _Target(name="x", value=1, tags=[])
+    groq = FakeLLMBackend("groq", response=payload.model_dump_json())
+    ollama = FakeLLMBackend("ollama")
+    svc = LLMService(
+        settings_, groq_backend=groq, ollama_backend=ollama, sleep=_noop_sleep
+    )
+
+    await svc.complete_json("prompt", _Target)
+
+    assert groq.last_json_mode is True
+
+
+async def test_complete_uses_free_form_mode() -> None:
+    """Free-form ``complete`` calls the backend with ``json_mode=False``."""
+
+    settings_ = Settings(GROQ_API_KEY="test-key")
+    groq = FakeLLMBackend("groq", response="hello")
+    ollama = FakeLLMBackend("ollama")
+    svc = LLMService(
+        settings_, groq_backend=groq, ollama_backend=ollama, sleep=_noop_sleep
+    )
+
+    await svc.complete("prompt")
+
+    assert groq.last_json_mode is False
+
+
 def test_repair_json_strips_fences_and_trailing_commas() -> None:
     """The repair helper recovers a fenced object with a trailing comma."""
 
