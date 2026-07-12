@@ -63,6 +63,13 @@ _TOOL_DRAFT_SECTION = "draft_section"
 _TOOL_GENERATE_TABLE_DATA = "generate_table_data"
 _TOOL_BUILD_DOCX = "build_docx"
 
+# The heading used for the synthesized executive summary section.
+_EXECUTIVE_SUMMARY_TITLE = "Executive Summary"
+
+# The maximum number of characters of accumulated content fed as context when
+# synthesizing the executive summary, bounding the prompt size.
+_SUMMARY_CONTEXT_MAX_CHARS = 6000
+
 # The set of registered tool identifiers that must never surface as a
 # user-visible section heading (they are internal routing names, not titles).
 _KNOWN_TOOL_NAMES = frozenset(
@@ -503,6 +510,10 @@ class Executor:
         )
 
         tool_name = self._resolve_tool_name(step, tool_names)
+        # Before assembling the final document, synthesize a genuine executive
+        # summary from the accumulated content and place it first (Req 10.1).
+        if tool_name == _TOOL_BUILD_DOCX:
+            await self._synthesize_executive_summary(sections, run_state)
         kwargs = self._build_kwargs(tool_name, step, run_state, sections)
         result, error = await self._invoke_with_retry(tool_name, kwargs, run_state, step)
 
@@ -621,6 +632,102 @@ class Executor:
         if assumptions:
             result.append({"heading": "Key Assumptions", "bullets": assumptions})
         return result
+
+    async def _synthesize_executive_summary(
+        self, sections: list[dict[str, Any]], run_state: RunState
+    ) -> None:
+        """Synthesize an executive summary from the drafted content (Req 10.1).
+
+        After all content steps have run and before ``build_docx`` assembles the
+        document, this produces a genuine executive summary of the whole
+        deliverable (rather than a generic one drafted before the other sections
+        existed). It concatenates the accumulated sections' headings and bodies
+        into a bounded context string, dispatches the existing ``draft_section``
+        tool to generate the summary prose, and inserts it as the FIRST section.
+
+        If the accumulated sections already contain an "Executive Summary"
+        (case-insensitive), that section's body is replaced with the synthesized
+        summary and it is moved to the front rather than duplicated.
+
+        The synthesis is strictly best-effort: it is a no-op when there is no
+        accumulated content, and any error (LLM failure, empty output) is caught
+        and logged so the document is still built with the existing sections and
+        the Run never fails. The sections list is mutated in place.
+
+        Args:
+            sections: The accumulated content section payloads (mutated in place).
+            run_state: The owning Run state (used for decision logging).
+        """
+
+        try:
+            if not sections:
+                return
+
+            # Locate any existing "Executive Summary" section for dedupe/replace.
+            existing_index: int | None = None
+            for index, section in enumerate(sections):
+                heading = str(section.get("heading", "") or "").strip().lower()
+                if heading == _EXECUTIVE_SUMMARY_TITLE.lower():
+                    existing_index = index
+                    break
+
+            context = self._assemble_summary_context(sections, existing_index)
+            if not context.strip():
+                return
+
+            result = await self._tools.dispatch(
+                _TOOL_DRAFT_SECTION,
+                title=_EXECUTIVE_SUMMARY_TITLE,
+                context=context,
+            )
+            summary_body = (result.output if result is not None else "") or ""
+            if not summary_body.strip():
+                return
+
+            if existing_index is not None:
+                sections.pop(existing_index)
+            sections.insert(
+                0, {"heading": _EXECUTIVE_SUMMARY_TITLE, "body": summary_body}
+            )
+            self._safe_log(
+                run_state.run_id,
+                "synthesized executive summary from drafted content",
+                section_count=len(sections),
+            )
+        except Exception as exc:  # noqa: BLE001 - synthesis must never fail a Run
+            self._safe_log(
+                run_state.run_id,
+                "best-effort executive summary synthesis failed and was suppressed",
+                level="WARNING",
+                error=str(exc),
+            )
+
+    @staticmethod
+    def _assemble_summary_context(
+        sections: list[dict[str, Any]], skip_index: int | None = None
+    ) -> str:
+        """Concatenate section headings and bodies into a bounded context string.
+
+        Args:
+            sections: The accumulated content section payloads.
+            skip_index: An optional index to skip (an existing "Executive
+                Summary" section) so the synthesis draws only on real content.
+
+        Returns:
+            The concatenated ``heading`` + ``body`` blocks of the sections,
+            truncated to :data:`_SUMMARY_CONTEXT_MAX_CHARS` characters.
+        """
+
+        parts: list[str] = []
+        for index, section in enumerate(sections):
+            if index == skip_index:
+                continue
+            heading = str(section.get("heading", "") or "").strip()
+            body = str(section.get("body", "") or "").strip()
+            block = "\n".join(piece for piece in (heading, body) if piece)
+            if block:
+                parts.append(block)
+        return "\n\n".join(parts)[:_SUMMARY_CONTEXT_MAX_CHARS]
 
     async def _invoke_with_retry(
         self,

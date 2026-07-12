@@ -36,7 +36,7 @@ from app.agent.tools import build_default_registry
 from app.core.config import Settings
 from app.core.event_bus import EventBus
 from app.core.run_store import RunStore
-from app.models.schemas import PlanStep
+from app.models.schemas import Plan, PlanStep
 from app.services.docx_builder import DocumentBuilder
 from app.services.llm import LLMService
 from tests.conftest import FakeLLMBackend
@@ -155,6 +155,12 @@ def test_docx_headings_equal_section_titles_and_toc_lists_them(
     assert "Cloud CRM Overview" in heading_texts
     assert "On-Premise vs Cloud Comparison" in heading_texts
 
+    # A synthesized "Executive Summary" is now the FIRST content heading (the
+    # "Table of Contents" heading precedes all content headings but is not one).
+    assert "Executive Summary" in heading_texts
+    content_headings = [h for h in heading_texts if h != "Table of Contents"]
+    assert content_headings[0] == "Executive Summary"
+
     # No awkward, truncated verb-led phrase leaks into the headings.
     assert not any(h.startswith("Research The") for h in heading_texts)
     assert not any(h.startswith("Draft The") for h in heading_texts)
@@ -176,6 +182,102 @@ def test_docx_headings_equal_section_titles_and_toc_lists_them(
     paragraph_texts = [p.text for p in document.paragraphs]
     assert sum(1 for t in paragraph_texts if "Cloud CRM Overview" in t) >= 2
     assert sum(1 for t in paragraph_texts if "On-Premise vs Cloud Comparison" in t) >= 2
+
+
+class _CapturingBuilder:
+    """A minimal document builder that records the sections it was asked to build.
+
+    It writes a tiny placeholder file so the Executor can record a document path,
+    and captures the exact ordered ``sections`` list passed to :meth:`build` so a
+    test can assert the assembly order (Executive Summary first, Key Assumptions
+    last) without parsing a real ``.docx``.
+    """
+
+    def __init__(self) -> None:
+        self.sections: list[dict] | None = None
+
+    def build(self, *, title, prepared_by, sections, output_path) -> Path:
+        self.sections = [dict(section) for section in sections]
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"PK\x03\x04 fake-docx")
+        return output_path
+
+
+def test_executor_synthesizes_executive_summary_first_and_assumptions_last(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """The Executor inserts a synthesized Executive Summary first (Fix 2).
+
+    Driving the real Executor (with a fake LLM) over a plan with two content
+    steps and a ``build_docx`` step, the sections handed to ``build_docx`` must
+    begin with a synthesized "Executive Summary" and end with "Key Assumptions"
+    (present because the Run recorded assumptions).
+    """
+
+    monkeypatch.chdir(tmp_path)
+
+    async def _run() -> list[dict]:
+        llm = _build_llm(_plan_json())
+        builder = _CapturingBuilder()
+        bus = EventBus()
+        store = RunStore()
+        registry = build_default_registry(llm, builder)
+        executor = Executor(registry, bus, max_retries=0)
+        run_state = store.create(
+            "exec-summary-run",
+            request="Create a CRM cloud-migration proposal.",
+            client_ip="127.0.0.1",
+        )
+        run_state.plan = Plan(
+            steps=[
+                PlanStep(
+                    step=1,
+                    task="research",
+                    section_title="Cloud CRM Overview",
+                    description="Research the CRM landscape.",
+                    expected_output="Researched facts.",
+                ),
+                PlanStep(
+                    step=2,
+                    task="draft_section",
+                    section_title="On-Premise vs Cloud Comparison",
+                    description="Draft the comparison of the two approaches.",
+                    expected_output="A drafted section.",
+                ),
+                PlanStep(
+                    step=3,
+                    task="build_docx",
+                    section_title="",
+                    description="Assemble the final Word document.",
+                    expected_output="The .docx deliverable.",
+                ),
+            ],
+            assumptions=[],
+        )
+        run_state.assumptions = [
+            "The target cloud is a major public cloud provider.",
+            "The audience is executive leadership.",
+        ]
+        await executor.run(run_state)
+        assert builder.sections is not None
+        return builder.sections
+
+    sections = asyncio.run(_run())
+
+    # The synthesized executive summary is first and has a non-empty body.
+    assert sections[0]["heading"] == "Executive Summary"
+    assert sections[0].get("body", "").strip()
+
+    # The two content sections are present between the summary and assumptions.
+    headings = [section["heading"] for section in sections]
+    assert "Cloud CRM Overview" in headings
+    assert "On-Premise vs Cloud Comparison" in headings
+
+    # The Key Assumptions bullet section remains last.
+    assert sections[-1]["heading"] == "Key Assumptions"
+    assert headings.index("Executive Summary") == 0
+    assert headings.index("Key Assumptions") == len(headings) - 1
 
 
 # ---------------------------------------------------------------------------

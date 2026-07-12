@@ -87,6 +87,27 @@ _ITALIC_RE = re.compile(r"\*(.+?)\*|_(.+?)_")
 # The TOC field instruction (headings levels 1-3) inserted for the table of contents.
 _TOC_INSTRUCTION = ' TOC \\o "1-3" \\h \\z \\u '
 
+# Approximate number of rendered body characters that fit on a single page. Used
+# only to compute a realistic *cached* TOC page number for each entry; Microsoft
+# Word recomputes the exact page numbers on open (``w:updateFields``). Chosen in
+# the 2600-3000 range for a typical single-column business page.
+_CHARS_PER_PAGE = 2800
+
+# Rough character overhead attributed to a rendered heading line (the heading
+# text plus its surrounding paragraph spacing) when estimating page positions.
+_HEADING_CHAR_OVERHEAD = 60
+
+# Rough characters contributed by a single rendered table row when estimating.
+_TABLE_ROW_CHARS = 90
+
+# A small fixed per-section overhead (paragraph spacing, etc.) in the estimate.
+_SECTION_CHAR_OVERHEAD = 40
+
+# Estimated rendered characters of the synthesized "Key Considerations" fallback
+# bullet section (its heading is counted separately); a small fixed value since
+# the fallback emits a short, fixed set of generic bullet points.
+_SYNTHESIZED_BULLETS_CHARS = 150
+
 
 def _is_valid_hex_color(candidate: str) -> bool:
     """Return whether ``candidate`` is exactly six hexadecimal digits.
@@ -231,9 +252,13 @@ class DocumentBuilder:
         # position is its bookmark index, so section headings can be tagged with
         # matching bookmarks that the TOC ``PAGEREF`` fields target.
         toc_entries = self._compute_toc_entries(sections)
+        # Estimate a realistic starting page number for each TOC entry from the
+        # accumulated rendered content before it (content flows continuously with
+        # no per-section page breaks), used as the cached PAGEREF display text.
+        toc_pages = self._estimate_page_numbers(sections)
 
         self._add_cover_page(document, title=title, prepared_by=prepared_by)
-        self._add_table_of_contents(document, toc_entries)
+        self._add_table_of_contents(document, toc_entries, toc_pages)
 
         has_bullets = False
         for index, section in enumerate(sections):
@@ -344,8 +369,114 @@ class DocumentBuilder:
             entries.append(("Key Considerations", 2))
         return entries
 
+    def _estimate_page_numbers(
+        self, sections: Sequence[Mapping[str, Any]]
+    ) -> list[int]:
+        """Estimate a realistic starting page number for each TOC entry (Req 10.1).
+
+        The estimate walks the SAME ordered entries as :meth:`_compute_toc_entries`
+        (the real sections plus the synthesized "Key Considerations" fallback when
+        present) and assigns each entry a starting page from the accumulated
+        rendered content BEFORE it. Because content sections flow continuously
+        (there is no page break between them — only one break after the TOC),
+        multiple short sections legitimately share a page, so this replaces the
+        old naive per-entry increment (2, 3, 4, ...) with a content-length model:
+
+        - Content begins on page 2 (page 1 holds the cover block and the TOC).
+        - Each section's rendered size (in characters) is estimated as the heading
+          overhead plus its body length, its bullet lengths, its table rows
+          (``rows * _TABLE_ROW_CHARS``), and a small fixed per-section overhead.
+        - A page holds roughly :data:`_CHARS_PER_PAGE` characters, so an entry's
+          start page is ``2 + cumulative_chars_before_it // _CHARS_PER_PAGE``. The
+          numbers are therefore monotonic non-decreasing.
+
+        The estimate is defensive: it never raises, tolerates missing or oversized
+        fields, and caps each number so the last entry cannot exceed ``2 +
+        total_estimated_pages``. On any unexpected error it falls back to the
+        monotonic ``index + 2`` estimate.
+
+        Args:
+            sections: The ordered section payloads that will be rendered.
+
+        Returns:
+            One integer per TOC entry, aligned by index with
+            :meth:`_compute_toc_entries`.
+        """
+
+        entries = self._compute_toc_entries(sections)
+        try:
+            sizes: list[int] = []
+            for index, entry in enumerate(entries):
+                section = sections[index] if index < len(sections) else None
+                sizes.append(self._estimate_section_chars(entry, section))
+
+            total_chars = sum(sizes)
+            # ``ceil`` of the total content over the per-page capacity, at least 1.
+            total_pages = max(1, -(-total_chars // _CHARS_PER_PAGE))
+            max_page = 2 + total_pages
+
+            numbers: list[int] = []
+            cumulative = 0
+            for size in sizes:
+                page = 2 + cumulative // _CHARS_PER_PAGE
+                if page > max_page:
+                    page = max_page
+                numbers.append(page)
+                cumulative += size
+            return numbers
+        except Exception:  # noqa: BLE001 - estimation must never fail a build
+            return [index + 2 for index in range(len(entries))]
+
+    @staticmethod
+    def _estimate_section_chars(
+        entry: tuple[str, int], section: Mapping[str, Any] | None
+    ) -> int:
+        """Estimate the rendered character count of one TOC entry's section.
+
+        Args:
+            entry: The ``(heading, level)`` tuple for the entry (its heading text
+                contributes to the estimate).
+            section: The section payload backing the entry, or ``None`` for the
+                synthesized "Key Considerations" fallback bullet section.
+
+        Returns:
+            A non-negative estimated character count; a small default on any
+            unexpected error so estimation never raises.
+        """
+
+        try:
+            heading_text, _level = entry
+            chars = _HEADING_CHAR_OVERHEAD + len(str(heading_text or ""))
+
+            if section is None:
+                # The synthesized "Key Considerations" fallback bullet section.
+                chars += _SYNTHESIZED_BULLETS_CHARS
+            else:
+                body = section.get("body")
+                if isinstance(body, str):
+                    chars += len(body)
+
+                bullets = section.get("bullets")
+                if isinstance(bullets, (list, tuple)):
+                    for bullet in bullets:
+                        chars += len(str(bullet))
+
+                table = section.get("table")
+                if isinstance(table, Mapping):
+                    rows = table.get("rows")
+                    if isinstance(rows, (list, tuple)):
+                        chars += len(rows) * _TABLE_ROW_CHARS
+
+            chars += _SECTION_CHAR_OVERHEAD
+            return max(0, chars)
+        except Exception:  # noqa: BLE001 - estimation must never fail a build
+            return _HEADING_CHAR_OVERHEAD + _SECTION_CHAR_OVERHEAD
+
     def _add_table_of_contents(
-        self, document: Document, entries: Sequence[tuple[str, int]]
+        self,
+        document: Document,
+        entries: Sequence[tuple[str, int]],
+        page_numbers: Sequence[int] | None = None,
     ) -> None:
         """Insert a heading and a real, visible Word ``TOC`` field (Req 10.1).
 
@@ -368,6 +499,10 @@ class DocumentBuilder:
             document: The document being assembled.
             entries: The ordered ``(heading, level)`` list to render as the
                 cached TOC result.
+            page_numbers: The per-entry cached starting page numbers (aligned by
+                index with ``entries``). When ``None`` or shorter than
+                ``entries``, entries fall back to a monotonic ``index + 2``
+                estimate.
         """
 
         self._add_styled_heading(document, "Table of Contents", level=1)
@@ -395,13 +530,18 @@ class DocumentBuilder:
             )
             entry_paragraph.add_run(text)
             entry_paragraph.add_run("\t")
-            # Content starts on page 2 (cover + TOC share page 1), so number the
-            # entries monotonically 2, 3, 4, ... as a best-effort cached estimate;
-            # Word overwrites these with exact page numbers on open.
+            # Content starts on page 2 (cover + TOC share page 1). The cached page
+            # number is a content-length-based estimate (multiple short sections
+            # may share a page) rather than a naive per-entry increment; Word
+            # overwrites these with the exact page numbers on open.
+            if page_numbers is not None and index < len(page_numbers):
+                cached_text = str(page_numbers[index])
+            else:
+                cached_text = str(index + 2)
             self._append_pageref_field(
                 entry_paragraph,
                 bookmark_name=f"_Toc_{index}",
-                cached_text=str(index + 2),
+                cached_text=cached_text,
             )
             last_paragraph = entry_paragraph
 

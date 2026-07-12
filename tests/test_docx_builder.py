@@ -363,6 +363,74 @@ def test_toc_entries_show_page_numbers_with_pageref_fields(tmp_path) -> None:
     assert toc_entry_texts, "expected a TOC entry with a visible page number"
 
 
+def test_toc_cached_page_numbers_are_content_length_based(tmp_path) -> None:
+    """Cached TOC page numbers reflect content length, not a per-entry increment.
+
+    Several short sections flow continuously with no page breaks between them, so
+    their cached TOC page numbers must be monotonic non-decreasing, start at 2
+    (content begins on page 2, after the cover + TOC on page 1), and stay small:
+    multiple short sections share a page rather than each incrementing the number
+    (which the old naive 2, 3, 4, ... scheme produced). PAGEREF fields remain so
+    Microsoft Word still fills in the exact page numbers on open.
+    """
+
+    # Several short sections, each with a bullet so no synthesized "Key
+    # Considerations" entry is appended (keeps entry count == section count).
+    sections = [
+        {
+            "heading": f"Section {n}",
+            "level": 1,
+            "body": "A short paragraph of body text.",
+            "bullets": ["A concise point"],
+        }
+        for n in range(1, 7)
+    ]
+
+    output_path = tmp_path / "estimated_pages.docx"
+    builder = DocumentBuilder("1F4E79")
+    written = builder.build(
+        title="Estimated Pages Report",
+        prepared_by="Tester",
+        sections=sections,
+        output_path=output_path,
+    )
+
+    document = Document(str(written))
+    document_xml = document.element.xml
+
+    # PAGEREF fields are still present so Word computes exact pages on open.
+    assert "PAGEREF" in document_xml
+
+    # Collect the cached page numbers from the TOC entry paragraphs. A TOC entry
+    # is a non-heading paragraph carrying a tab followed by the cached number.
+    cached_numbers: list[int] = []
+    for paragraph in document.paragraphs:
+        if paragraph.style is not None and paragraph.style.name.startswith("Heading"):
+            continue
+        text = paragraph.text
+        if "\t" not in text:
+            continue
+        trailing = text.split("\t")[-1].strip()
+        if trailing.isdigit():
+            cached_numbers.append(int(trailing))
+
+    # One cached number per section entry.
+    assert len(cached_numbers) == len(sections)
+
+    # They start at page 2 and are monotonic non-decreasing.
+    assert cached_numbers[0] == 2
+    assert all(
+        earlier <= later
+        for earlier, later in zip(cached_numbers, cached_numbers[1:], strict=False)
+    )
+
+    # The numbers stay small: multiple short sections share a page, so the max is
+    # far below what a naive one-page-per-section scheme (2, 3, 4, ...) yields.
+    naive_max = 2 + (len(sections) - 1)
+    assert max(cached_numbers) < naive_max
+    assert max(cached_numbers) <= len(sections)
+
+
 # --- Property 15 ------------------------------------------------------------
 
 
