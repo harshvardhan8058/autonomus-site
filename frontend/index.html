@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Autonomous Agent Service — Mission Control</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="console" role="main">
+      <!-- Idle state: centered input, one-line description, example chips -->
+      <section class="idle" id="idle-panel" aria-labelledby="app-title">
+        <div class="idle-inner">
+          <h1 class="app-title" id="app-title">Autonomous Agent Service</h1>
+          <p class="app-description" id="app-description">
+            Describe a business document and the agent will plan, draft, self-check, and deliver a polished Word (.docx) file.
+          </p>
+
+          <form class="request-form" id="request-form" autocomplete="off">
+            <label class="visually-hidden" for="request-input">Business document request</label>
+            <textarea
+              class="request-input"
+              id="request-input"
+              name="request"
+              rows="3"
+              placeholder="Describe the document you need…"
+              aria-describedby="app-description"
+            ></textarea>
+
+            <button class="submit-button" id="submit-button" type="submit">
+              Launch agent
+            </button>
+          </form>
+
+          <div class="chips" id="example-chips" role="group" aria-label="Example requests">
+            <button
+              type="button"
+              class="chip"
+              data-example="Create a project proposal for migrating our on-premise CRM to the cloud."
+            >Create a project proposal for migrating our on-premise CRM to the cloud.</button>
+            <button
+              type="button"
+              class="chip"
+              data-example="We need something for the leadership meeting next week about the new product... it should cover the important stuff, budget maybe, and the timeline isn't final. Make it look official."
+            >We need something for the leadership meeting next week about the new product... it should cover the important stuff, budget maybe, and the timeline isn't final. Make it look official.</button>
+          </div>
+
+          <p class="error-banner" id="error-banner" role="alert" hidden></p>
+        </div>
+      </section>
+
+      <!-- Run state: timeline, assumptions, reasoning log, result card -->
+      <section class="run" id="run-panel" aria-label="Agent run">
+        <!-- Plan_Step timeline, hidden until a run is submitted (Req 11.2) -->
+        <div class="timeline" id="timeline" hidden aria-live="polite">
+          <h2 class="section-heading">Plan timeline</h2>
+          <ol class="timeline-list" id="timeline-list"></ol>
+        </div>
+
+        <!-- Assumptions panel (Req 11.6) -->
+        <aside class="assumptions" id="assumptions-panel" hidden aria-label="Assumptions">
+          <h2 class="section-heading">Assumptions</h2>
+          <ul class="assumptions-list" id="assumptions-list"></ul>
+        </aside>
+
+        <!-- Reasoning log, monospace (Req 11 aesthetic) -->
+        <section class="reasoning" id="reasoning-log" hidden aria-label="Agent reasoning log">
+          <h2 class="section-heading">Reasoning log</h2>
+          <pre class="reasoning-output" id="reasoning-output" tabindex="0"></pre>
+        </section>
+
+        <!-- Result card (Req 11.7) -->
+        <section class="result-card" id="result-card" hidden aria-label="Run result">
+          <h2 class="section-heading">Result</h2>
+          <p class="result-status" id="result-status"></p>
+          <p class="result-summary" id="result-summary"></p>
+          <div class="result-steps" id="result-steps"></div>
+          <a class="download-button" id="download-button" href="#" hidden>Download .docx</a>
+        </section>
+      </section>
+    </main>
+
+    <script src="app.js" defer></script>
+  </body>
+</html>

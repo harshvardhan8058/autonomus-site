@@ -1,0 +1,25 @@
+# Runtime dependencies for the Autonomous Agent Service (Python 3.11+).
+# Pinned to compatible lower bounds; the service runs with zero paid API keys.
+
+# --- Web framework / ASGI server ---
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+
+# --- Data validation / settings ---
+pydantic>=2,<3
+pydantic-settings==2.7.1
+
+# --- LLM backends ---
+groq==0.13.1
+httpx==0.28.1
+
+# --- Document generation ---
+python-docx==1.1.2
+
+# --- Retry / backoff ---
+tenacity==9.0.0
+
+# --- Testing (property-based + async) ---
+pytest==8.3.4
+pytest-asyncio==0.25.2
+hypothesis==6.123.2

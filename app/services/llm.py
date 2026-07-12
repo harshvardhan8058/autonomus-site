@@ -1,0 +1,681 @@
+"""LLM service with Groq-primary / Ollama-fallback backends (Req 5, 2.4, 2.5).
+
+This module defines :class:`LLMService`, the single choke point for every LLM
+call in the Autonomous Agent Service. It is responsible for:
+
+- **Backend selection** — Groq is the primary backend whenever ``GROQ_API_KEY``
+  is set; otherwise the service uses the local Ollama backend (Req 5.1, 5.2).
+- **Resilient completions** — every call is wrapped with exponential-backoff
+  retries (at most :data:`Settings.LLM_MAX_RETRIES` attempts per backend) and a
+  Groq -> Ollama fallback (Req 5.3, 2.4, 2.5).
+- **JSON-constrained completions** — :meth:`LLMService.complete_json` parses the
+  model output into a Pydantic schema, running a JSON-repair pass on malformed
+  output before retrying, and raising :class:`LLMJSONError` only after repair
+  and retries fail on every backend (Req 2.4, property P6).
+- **Health probing** — :meth:`LLMService.health` reports the active backend name
+  and whether it is reachable, powering ``/health`` and ``/health/ready``
+  (Req 5.4, 5.6).
+
+Backends are accessed through the small :class:`LLMBackend` transport protocol,
+so tests inject a fake backend and exercise the retry / fallback / repair logic
+without any network calls (see ``tests/conftest.py``).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import re
+from collections.abc import Awaitable, Callable
+from typing import Protocol, TypeVar, runtime_checkable
+
+from pydantic import BaseModel, ValidationError
+
+from app.core.config import Settings
+
+SchemaT = TypeVar("SchemaT", bound=BaseModel)
+
+# Base delay (seconds) for the exponential-backoff schedule. The Nth retry waits
+# ``_BACKOFF_BASE_SECONDS * 2 ** (attempt - 1)`` seconds. The sleep function is
+# injectable so tests can substitute a no-op and avoid real delays.
+_BACKOFF_BASE_SECONDS = 0.5
+
+
+# ---------------------------------------------------------------------------
+# Exceptions
+# ---------------------------------------------------------------------------
+
+
+class LLMError(Exception):
+    """Raised when an LLM completion fails on all backends after retries.
+
+    Carries the human-readable reason and, when available, the underlying cause
+    of the final failure (accessible via ``__cause__``).
+    """
+
+
+class LLMJSONError(LLMError):
+    """Raised when a JSON-constrained completion cannot yield schema-valid output.
+
+    This is raised by :meth:`LLMService.complete_json` **only** after the
+    JSON-repair pass and all retries have failed on every backend (Req 2.4,
+    property P6). It signals a clean failure: the service never returns a
+    partially-parsed or schema-invalid object.
+    """
+
+
+# ---------------------------------------------------------------------------
+# Backend transport seam
+# ---------------------------------------------------------------------------
+
+
+@runtime_checkable
+class LLMBackend(Protocol):
+    """Pluggable transport for a single LLM backend (Groq, Ollama, or a fake).
+
+    Implementations perform the raw text completion and a lightweight
+    reachability probe. All retry, fallback, and JSON-repair logic lives in
+    :class:`LLMService`, so a backend only needs to translate a prompt into a
+    completion string and report whether it is reachable.
+
+    Attributes:
+        name: The stable backend name (``"groq"`` or ``"ollama"``).
+    """
+
+    name: str
+
+    async def complete(
+        self,
+        *,
+        prompt: str,
+        system: str | None,
+        temperature: float,
+        max_tokens: int,
+    ) -> str:
+        """Produce a free-form completion for ``prompt``.
+
+        Args:
+            prompt: The user prompt.
+            system: An optional system instruction.
+            temperature: Sampling temperature.
+            max_tokens: Maximum tokens to generate.
+
+        Returns:
+            The completion text.
+
+        Raises:
+            Exception: Any transport/backend error; the service treats a raised
+                exception as a failed attempt eligible for retry/fallback.
+        """
+        ...
+
+    async def health(self) -> bool:
+        """Return whether the backend is currently reachable."""
+        ...
+
+
+class GroqBackend:
+    """Groq free-tier transport using the ``groq`` async SDK (Req 5.1).
+
+    Uses the model configured in :data:`Settings.GROQ_MODEL` (default
+    ``llama-3.3-70b-versatile``). The SDK client is created lazily so that
+    constructing an :class:`LLMService` never requires a key to be present.
+
+    Attributes:
+        name: Always ``"groq"``.
+    """
+
+    name = "groq"
+
+    def __init__(self, settings: Settings) -> None:
+        """Initialize the Groq backend.
+
+        Args:
+            settings: The service settings providing the API key, model, and
+                per-call timeout.
+        """
+
+        self._settings = settings
+        self._client: object | None = None
+
+    def _get_client(self) -> object:
+        """Return a lazily-created ``AsyncGroq`` client.
+
+        Returns:
+            The Groq async client instance.
+        """
+
+        if self._client is None:
+            from groq import AsyncGroq
+
+            self._client = AsyncGroq(
+                api_key=self._settings.GROQ_API_KEY,
+                timeout=float(self._settings.LLM_TIMEOUT_SECONDS),
+            )
+        return self._client
+
+    async def complete(
+        self,
+        *,
+        prompt: str,
+        system: str | None,
+        temperature: float,
+        max_tokens: int,
+    ) -> str:
+        """Produce a completion via the Groq chat-completions API."""
+
+        client = self._get_client()
+        messages: list[dict[str, str]] = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+
+        response = await client.chat.completions.create(  # type: ignore[attr-defined]
+            model=self._settings.GROQ_MODEL,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        return response.choices[0].message.content or ""
+
+    async def health(self) -> bool:
+        """Probe Groq reachability by listing available models."""
+
+        client = self._get_client()
+        await client.models.list()  # type: ignore[attr-defined]
+        return True
+
+
+class OllamaBackend:
+    """Local Ollama transport over HTTP using ``httpx`` (Req 5.2).
+
+    Calls the Ollama ``/api/generate`` endpoint at
+    :data:`Settings.OLLAMA_BASE_URL` with the model
+    :data:`Settings.OLLAMA_MODEL`.
+
+    Attributes:
+        name: Always ``"ollama"``.
+    """
+
+    name = "ollama"
+
+    def __init__(self, settings: Settings) -> None:
+        """Initialize the Ollama backend.
+
+        Args:
+            settings: The service settings providing the base URL, model, and
+                per-call timeout.
+        """
+
+        self._settings = settings
+
+    @property
+    def _base_url(self) -> str:
+        """Return the Ollama base URL without a trailing slash."""
+
+        return self._settings.OLLAMA_BASE_URL.rstrip("/")
+
+    async def complete(
+        self,
+        *,
+        prompt: str,
+        system: str | None,
+        temperature: float,
+        max_tokens: int,
+    ) -> str:
+        """Produce a completion via the Ollama ``/api/generate`` endpoint."""
+
+        import httpx
+
+        payload: dict[str, object] = {
+            "model": self._settings.OLLAMA_MODEL,
+            "prompt": prompt,
+            "stream": False,
+            "options": {"temperature": temperature, "num_predict": max_tokens},
+        }
+        if system:
+            payload["system"] = system
+
+        async with httpx.AsyncClient(
+            timeout=float(self._settings.LLM_TIMEOUT_SECONDS)
+        ) as client:
+            response = await client.post(
+                f"{self._base_url}/api/generate", json=payload
+            )
+            response.raise_for_status()
+            data = response.json()
+        return str(data.get("response", ""))
+
+    async def health(self) -> bool:
+        """Probe Ollama reachability via the ``/api/tags`` endpoint."""
+
+        import httpx
+
+        async with httpx.AsyncClient(
+            timeout=float(self._settings.LLM_TIMEOUT_SECONDS)
+        ) as client:
+            response = await client.get(f"{self._base_url}/api/tags")
+        return response.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# LLM service
+# ---------------------------------------------------------------------------
+
+
+class LLMService:
+    """Resilient LLM facade with backend selection, retries, and JSON repair.
+
+    The service resolves its active backend from :data:`Settings.GROQ_API_KEY`
+    (Groq when set, else Ollama), wraps every call in exponential-backoff
+    retries with a Groq -> Ollama fallback, and offers a JSON-constrained
+    completion that repairs malformed model output before failing cleanly.
+
+    Attributes:
+        _settings: The service settings.
+        _groq: The Groq backend transport.
+        _ollama: The Ollama backend transport.
+        _sleep: The (injectable) async sleep used between retries.
+        _resolved: Whether the active backend has been resolved.
+        _backend_name: The resolved active-backend name, or ``"unknown"``.
+    """
+
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        groq_backend: LLMBackend | None = None,
+        ollama_backend: LLMBackend | None = None,
+        sleep: Callable[[float], Awaitable[None]] | None = None,
+        resolve: bool = True,
+    ) -> None:
+        """Initialize the LLM service.
+
+        Args:
+            settings: The service settings driving backend selection, model
+                names, retry count, and timeouts.
+            groq_backend: An optional Groq transport override. When ``None``, a
+                real :class:`GroqBackend` is created. Tests inject a fake here.
+            ollama_backend: An optional Ollama transport override. When ``None``,
+                a real :class:`OllamaBackend` is created.
+            sleep: An optional async sleep function used between retries. When
+                ``None``, :func:`asyncio.sleep` is used. Tests inject a no-op to
+                avoid real delays.
+            resolve: When ``True`` (default), the active backend is resolved
+                eagerly at construction so :attr:`active_backend` is immediately
+                deterministic. When ``False``, :attr:`active_backend` reports
+                ``"unknown"`` until :meth:`resolve_backend` is called, modeling
+                the unresolved-backend health state (Req 5.5).
+        """
+
+        self._settings = settings
+        self._groq: LLMBackend = (
+            groq_backend if groq_backend is not None else GroqBackend(settings)
+        )
+        self._ollama: LLMBackend = (
+            ollama_backend if ollama_backend is not None else OllamaBackend(settings)
+        )
+        self._sleep: Callable[[float], Awaitable[None]] = (
+            sleep if sleep is not None else asyncio.sleep
+        )
+        self._resolved = False
+        self._backend_name = "unknown"
+        if resolve:
+            self.resolve_backend()
+
+    # -- backend selection --------------------------------------------------
+
+    def resolve_backend(self) -> str:
+        """Resolve and cache the active backend name from settings (Req 5.1, 5.2).
+
+        Returns:
+            The resolved active-backend name (``"groq"`` or ``"ollama"``).
+        """
+
+        self._backend_name = "groq" if self._settings.GROQ_API_KEY else "ollama"
+        self._resolved = True
+        return self._backend_name
+
+    @property
+    def active_backend(self) -> str:
+        """The active backend name.
+
+        Returns ``"groq"`` if and only if ``GROQ_API_KEY`` is set and the
+        backend has been resolved, ``"ollama"`` when no key is set, and
+        ``"unknown"`` while the backend remains unresolved (Req 5.1, 5.2, 5.5,
+        property P8).
+        """
+
+        if not self._resolved:
+            return "unknown"
+        return self._backend_name
+
+    def _backend_chain(self) -> list[LLMBackend]:
+        """Return the ordered backends to try for a call (primary first).
+
+        When Groq is active, the chain is ``[groq, ollama]`` so that an
+        exhausted Groq backend falls back to Ollama (Req 2.5, 5.3, property P7).
+        When Ollama is active (no Groq key), the chain is ``[ollama]``.
+
+        Returns:
+            The ordered list of backends to attempt.
+        """
+
+        if self.active_backend == "groq":
+            return [self._groq, self._ollama]
+        return [self._ollama]
+
+    def _backend_by_name(self, name: str) -> LLMBackend | None:
+        """Return the backend transport for a name, or ``None`` if unknown."""
+
+        if name == "groq":
+            return self._groq
+        if name == "ollama":
+            return self._ollama
+        return None
+
+    # -- public completion API ---------------------------------------------
+
+    async def complete(
+        self,
+        prompt: str,
+        *,
+        system: str | None = None,
+        temperature: float = 0.2,
+        max_tokens: int = 2048,
+    ) -> str:
+        """Return a free-form completion with retries and Groq -> Ollama fallback.
+
+        Each backend is attempted with up to :data:`Settings.LLM_MAX_RETRIES`
+        exponential-backoff attempts; if the primary backend is exhausted, the
+        secondary backend is attempted before failing (Req 5.3).
+
+        Args:
+            prompt: The user prompt.
+            system: An optional system instruction.
+            temperature: Sampling temperature.
+            max_tokens: Maximum tokens to generate.
+
+        Returns:
+            The completion text.
+
+        Raises:
+            LLMError: If every backend fails after all retries.
+        """
+
+        async def call(backend: LLMBackend) -> str:
+            return await backend.complete(
+                prompt=prompt,
+                system=system,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+
+        try:
+            return await self._run_with_fallback(call)
+        except LLMError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - normalize to the public error
+            raise LLMError("LLM completion failed on all backends") from exc
+
+    async def complete_json(
+        self,
+        prompt: str,
+        schema: type[SchemaT],
+        *,
+        system: str | None = None,
+    ) -> SchemaT:
+        """Return a completion parsed into ``schema``, repairing malformed JSON.
+
+        For each attempt the raw model output is parsed against ``schema``; on a
+        parse failure a JSON-repair pass (:meth:`_repair_json`) is applied and
+        the parse retried. If the attempt still fails it is retried under the
+        backoff/fallback policy. :class:`LLMJSONError` is raised only after
+        repair and all retries fail on every backend (Req 2.4, property P6).
+
+        Args:
+            prompt: The user prompt.
+            schema: The Pydantic model the output must validate against.
+            system: An optional system instruction; a JSON-only directive is
+                appended so the model is steered toward emitting pure JSON.
+
+        Returns:
+            A validated instance of ``schema``.
+
+        Raises:
+            LLMJSONError: If no backend yields schema-valid output after repair
+                and retries.
+        """
+
+        json_system = self._json_system_prompt(system)
+
+        async def call(backend: LLMBackend) -> SchemaT:
+            raw = await backend.complete(
+                prompt=prompt,
+                system=json_system,
+                temperature=0.0,
+                max_tokens=2048,
+            )
+            return self._parse_json(raw, schema)
+
+        try:
+            return await self._run_with_fallback(call)
+        except LLMJSONError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - normalize to the JSON error
+            raise LLMJSONError(
+                "failed to obtain schema-valid JSON from any backend"
+            ) from exc
+
+    async def health(self) -> tuple[str, bool]:
+        """Return ``(backend_name, reachable)`` for the active backend (Req 5.4, 5.6).
+
+        Returns:
+            A tuple of the active backend name and whether it is reachable. When
+            the backend is unresolved, returns ``("unknown", False)`` (Req 5.5).
+        """
+
+        name = self.active_backend
+        backend = self._backend_by_name(name)
+        if backend is None:
+            return ("unknown", False)
+        try:
+            reachable = await backend.health()
+        except Exception:  # noqa: BLE001 - health probing must never raise
+            reachable = False
+        return (name, bool(reachable))
+
+    # -- internal helpers ---------------------------------------------------
+
+    async def _run_with_fallback(
+        self, call: Callable[[LLMBackend], Awaitable[SchemaT]]
+    ) -> SchemaT:
+        """Run ``call`` across the backend chain, each with backoff (Req 2.5, 5.3).
+
+        Attempts the primary backend with :meth:`_with_backoff`; on exhaustion,
+        attempts the next backend in the chain. Raises the last error only after
+        every backend has been exhausted.
+
+        Args:
+            call: A coroutine factory taking a backend and producing a result.
+
+        Returns:
+            The first successful result.
+
+        Raises:
+            Exception: The last error encountered once every backend is exhausted.
+        """
+
+        last_exc: BaseException | None = None
+        for backend in self._backend_chain():
+            try:
+                return await self._with_backoff(lambda b=backend: call(b))
+            except Exception as exc:  # noqa: BLE001 - try the next backend
+                last_exc = exc
+                continue
+        assert last_exc is not None  # chain is never empty
+        raise last_exc
+
+    async def _with_backoff(
+        self, coro_factory: Callable[[], Awaitable[SchemaT]]
+    ) -> SchemaT:
+        """Invoke ``coro_factory`` with bounded exponential-backoff retries.
+
+        The maximum number of attempts is :data:`Settings.LLM_MAX_RETRIES`
+        (default 3, floored at 1). Between attempts the service sleeps for an
+        exponentially growing delay using the injectable sleep function
+        (Req 5.3, 2.4, property P7).
+
+        Args:
+            coro_factory: A zero-argument coroutine factory to invoke per attempt.
+
+        Returns:
+            The first successful result.
+
+        Raises:
+            Exception: The last error after all attempts are exhausted.
+        """
+
+        max_attempts = max(1, int(self._settings.LLM_MAX_RETRIES))
+        last_exc: BaseException | None = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                return await coro_factory()
+            except Exception as exc:  # noqa: BLE001 - retry until exhausted
+                last_exc = exc
+                if attempt < max_attempts:
+                    await self._sleep(_BACKOFF_BASE_SECONDS * (2 ** (attempt - 1)))
+        assert last_exc is not None  # at least one attempt always runs
+        raise last_exc
+
+    def _parse_json(self, raw: str, schema: type[SchemaT]) -> SchemaT:
+        """Parse ``raw`` into ``schema``, repairing malformed JSON on failure.
+
+        First attempts a direct parse; on failure applies :meth:`_repair_json`
+        and re-parses. Raises :class:`LLMJSONError` when both attempts fail so
+        the caller never receives a partial or invalid object (property P6).
+
+        Args:
+            raw: The raw model output.
+            schema: The Pydantic model to validate against.
+
+        Returns:
+            A validated instance of ``schema``.
+
+        Raises:
+            LLMJSONError: If neither the direct parse nor the repaired parse
+                yields a schema-valid instance.
+        """
+
+        try:
+            return schema.model_validate_json(raw)
+        except (ValidationError, ValueError):
+            pass
+
+        repaired = self._repair_json(raw)
+        try:
+            return schema.model_validate_json(repaired)
+        except (ValidationError, ValueError) as exc:
+            raise LLMJSONError("model output was not schema-valid JSON") from exc
+
+    def _json_system_prompt(self, system: str | None) -> str:
+        """Build the system prompt for JSON-constrained completions.
+
+        Args:
+            system: The caller-supplied system instruction, if any.
+
+        Returns:
+            The system instruction augmented with a JSON-only directive.
+        """
+
+        directive = (
+            "You must respond with a single valid JSON object only. "
+            "Do not include markdown code fences, commentary, or trailing text."
+        )
+        if system:
+            return f"{system}\n\n{directive}"
+        return directive
+
+    @staticmethod
+    def _repair_json(raw: str) -> str:
+        """Best-effort repair of malformed JSON text (Req 2.4).
+
+        The repair pass strips Markdown code fences, extracts the first balanced
+        ``{...}`` or ``[...]`` region, and removes trailing commas before object
+        and array terminators. When no balanced region is found (for example a
+        truncated response), the fence-stripped text is returned so that the
+        subsequent parse fails cleanly.
+
+        Args:
+            raw: The raw model output.
+
+        Returns:
+            A repaired JSON candidate string.
+        """
+
+        text = raw.strip()
+
+        # Strip Markdown code fences such as ```json ... ``` (or bare ``` ... ```).
+        fence = re.search(r"```(?:[a-zA-Z0-9_-]*)?\s*(.*?)\s*```", text, re.DOTALL)
+        if fence is not None:
+            text = fence.group(1).strip()
+        else:
+            # Remove a leading/trailing fence that was not balanced by the regex.
+            text = re.sub(r"^```[a-zA-Z0-9_-]*\s*", "", text)
+            text = re.sub(r"\s*```$", "", text).strip()
+
+        extracted = LLMService._extract_balanced(text)
+        if extracted is not None:
+            text = extracted
+
+        # Remove trailing commas before a closing brace/bracket: ``{"a":1,}`` etc.
+        text = re.sub(r",(\s*[}\]])", r"\1", text)
+        return text.strip()
+
+    @staticmethod
+    def _extract_balanced(text: str) -> str | None:
+        """Extract the first balanced ``{...}`` or ``[...]`` region from ``text``.
+
+        The scan is string-aware: braces and brackets inside JSON string
+        literals (and escaped quotes) are ignored. Returns ``None`` when there
+        is no opening delimiter or no matching close (for example truncated
+        output).
+
+        Args:
+            text: The candidate text to scan.
+
+        Returns:
+            The balanced substring, or ``None`` if none is found.
+        """
+
+        start = None
+        for i, ch in enumerate(text):
+            if ch in "{[":
+                start = i
+                break
+        if start is None:
+            return None
+
+        open_ch = text[start]
+        close_ch = "}" if open_ch == "{" else "]"
+        depth = 0
+        in_string = False
+        escape = False
+        for i in range(start, len(text)):
+            ch = text[i]
+            if in_string:
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == '"':
+                    in_string = False
+                continue
+            if ch == '"':
+                in_string = True
+            elif ch == open_ch:
+                depth += 1
+            elif ch == close_ch:
+                depth -= 1
+                if depth == 0:
+                    return text[start : i + 1]
+        return None

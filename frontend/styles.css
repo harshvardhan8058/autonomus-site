@@ -1,0 +1,412 @@
+/*
+ * Mission-control theme for the Autonomous Agent Service (Req 11.8).
+ *
+ * Dark aesthetic with EXACTLY one decorative accent color: amber (#FFB000).
+ * Only 2-3 neutral tones are used. A monospace typeface is reserved for the
+ * agent reasoning log. Functional status colors (done/failed/skipped) are used
+ * purely to convey step state, never as a second decorative accent. There are
+ * no violet/magenta hues and no gradient fills anywhere. Motion on state
+ * transitions is subtle (150-400ms) and fully disabled under
+ * prefers-reduced-motion.
+ */
+
+:root {
+  /* Neutrals (2-3 dark tones + text) */
+  --bg: #0e0f12;
+  --surface: #16181d;
+  --text: #e6e7ea;
+  --muted: #8a8f98;
+  --border: #262a31;
+
+  /* Single decorative accent */
+  --accent: #ffb000;
+
+  /* Functional status colors (not decorative) */
+  --status-done: #4f9d69;
+  --status-failed: #c65b5b;
+  --status-skipped: #6b7079;
+
+  --radius: 8px;
+  --space: 16px;
+  --transition-speed: 250ms;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+
+body {
+  background-color: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica,
+    Arial, sans-serif;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+.console {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 48px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 32px;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ----- Idle state ------------------------------------------------------- */
+
+.idle {
+  display: flex;
+  justify-content: center;
+  padding-top: 8vh;
+}
+
+.idle-inner {
+  width: 100%;
+  max-width: 640px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.app-title {
+  margin: 0;
+  font-size: 2rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.app-description {
+  margin: 0;
+  color: var(--muted);
+  font-size: 1rem;
+}
+
+.request-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.request-input {
+  width: 100%;
+  padding: 16px;
+  font-size: 1.05rem;
+  color: var(--text);
+  background-color: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  resize: vertical;
+  font-family: inherit;
+}
+
+.request-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.request-input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.submit-button {
+  align-self: center;
+  padding: 12px 28px;
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--bg);
+  background-color: var(--accent);
+  border: none;
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: opacity var(--transition-speed) ease;
+}
+
+.submit-button:hover {
+  opacity: 0.9;
+}
+
+.submit-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.chips {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.chip {
+  padding: 12px 16px;
+  font-size: 0.9rem;
+  text-align: left;
+  color: var(--text);
+  background-color: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: border-color var(--transition-speed) ease;
+}
+
+.chip:hover {
+  border-color: var(--accent);
+}
+
+.error-banner {
+  margin: 0;
+  padding: 12px 16px;
+  color: var(--status-failed);
+  background-color: var(--surface);
+  border: 1px solid var(--status-failed);
+  border-radius: var(--radius);
+  text-align: left;
+}
+
+/* ----- Run state -------------------------------------------------------- */
+
+.run {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.section-heading {
+  margin: 0 0 12px;
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+
+.timeline,
+.assumptions,
+.reasoning,
+.result-card {
+  background-color: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+}
+
+/* Timeline */
+
+.timeline-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.timeline-step {
+  display: flex;
+  gap: 14px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background-color: var(--bg);
+  transition: border-color var(--transition-speed) ease,
+    transform var(--transition-speed) ease, opacity var(--transition-speed) ease;
+}
+
+.step-badge {
+  flex: 0 0 auto;
+  width: 12px;
+  height: 12px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background-color: var(--muted);
+  transition: background-color var(--transition-speed) ease;
+}
+
+.step-body {
+  flex: 1 1 auto;
+}
+
+.step-title {
+  font-weight: 600;
+}
+
+.step-description {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.step-detail {
+  margin-top: 8px;
+  font-size: 0.85rem;
+  color: var(--text);
+}
+
+/* Step states (functional colors only) */
+
+.timeline-step.state-running {
+  border-color: var(--accent);
+}
+
+.timeline-step.state-running .step-badge {
+  background-color: var(--accent);
+  animation: pulse 1200ms ease-in-out infinite;
+}
+
+.timeline-step.state-done .step-badge {
+  background-color: var(--status-done);
+}
+
+.timeline-step.state-failed {
+  border-color: var(--status-failed);
+}
+
+.timeline-step.state-failed .step-badge {
+  background-color: var(--status-failed);
+}
+
+.timeline-step.state-skipped {
+  opacity: 0.55;
+}
+
+.timeline-step.state-skipped .step-badge {
+  background-color: var(--status-skipped);
+}
+
+/* Assumptions */
+
+.assumptions-list {
+  margin: 0;
+  padding-left: 20px;
+  color: var(--text);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* Reasoning log — monospace (Req 11.8) */
+
+.reasoning-output {
+  margin: 0;
+  padding: 16px;
+  max-height: 280px;
+  overflow-y: auto;
+  background-color: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-family: "JetBrains Mono", "SFMono-Regular", ui-monospace, Menlo,
+    Consolas, monospace;
+  font-size: 0.85rem;
+  color: var(--muted);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Result card */
+
+.result-status {
+  font-weight: 600;
+  margin: 0 0 8px;
+}
+
+.result-status.status-completed {
+  color: var(--status-done);
+}
+
+.result-status.status-partial {
+  color: var(--accent);
+}
+
+.result-status.status-failed {
+  color: var(--status-failed);
+}
+
+.result-summary {
+  margin: 0 0 16px;
+  color: var(--text);
+}
+
+.result-steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.result-step-badge {
+  padding: 4px 10px;
+  font-size: 0.8rem;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+
+.result-step-badge.state-done {
+  color: var(--status-done);
+  border-color: var(--status-done);
+}
+
+.result-step-badge.state-failed {
+  color: var(--status-failed);
+  border-color: var(--status-failed);
+}
+
+.result-step-badge.state-skipped {
+  color: var(--status-skipped);
+  border-color: var(--status-skipped);
+}
+
+.download-button {
+  display: inline-block;
+  padding: 12px 24px;
+  font-weight: 600;
+  color: var(--bg);
+  background-color: var(--accent);
+  border-radius: var(--radius);
+  text-decoration: none;
+  transition: opacity var(--transition-speed) ease;
+}
+
+.download-button:hover {
+  opacity: 0.9;
+}
+
+/* ----- Motion ----------------------------------------------------------- */
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}

@@ -1,0 +1,70 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autonomous-agent-service"
+version = "0.1.0"
+description = "Locally runnable, production-grade autonomous AI agent that turns a natural-language business request into a polished Microsoft Word (.docx) deliverable via a Planner -> Executor -> Reflector loop."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Autonomous Agent Service" }]
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "pydantic>=2",
+    "pydantic-settings",
+    "groq",
+    "httpx",
+    "python-docx",
+    "tenacity",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "hypothesis",
+    "ruff",
+]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["app", "tests"]
+
+[tool.ruff.lint]
+# Enable a pragmatic, production-friendly rule set.
+select = ["E", "F", "I", "UP", "B", "C4", "SIM"]
+# UP042 suggests `enum.StrEnum` over `(str, Enum)`. The design/tasks explicitly
+# specify all domain enums as `(str, Enum)` (stable, Pydantic v2-friendly, and
+# behaviourally distinct from StrEnum for `str()`), so this rewrite is declined
+# by design rather than left as noise.
+ignore = ["UP042"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's dependency-injection idiom relies on calling `Depends()` in argument
+# defaults, which is intentional and safe; treat it as an immutable call so B008
+# does not flag the API routers.
+extend-immutable-calls = ["fastapi.Depends"]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+# asyncio_mode=auto lets pytest-asyncio run `async def` tests without explicit markers.
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+# Register the `property` marker so `pytest -m property` runs only property-based tests
+# and unknown-marker warnings are not raised.
+markers = [
+    "property: property-based tests (Hypothesis); run with `pytest -m property`",
+]
