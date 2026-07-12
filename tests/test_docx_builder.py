@@ -292,3 +292,171 @@ def test_theme_color_resolution_is_safe_and_total(
     else:
         assert len(warnings) >= 1
         assert warnings[0]["component"] == "document_builder"
+
+
+
+# --- Rich body rendering (markdown -> Word formatting) ----------------------
+
+
+def _iter_block_items(document):
+    """Yield document body children as ('paragraph', p) / ('table', t) tuples.
+
+    Iterating the body in document order lets tests assert the relative order of
+    paragraphs, tables, and page breaks without relying on private internals.
+    """
+
+    from docx.oxml.ns import qn
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+
+    body = document.element.body
+    for child in body.iterchildren():
+        if child.tag == qn("w:p"):
+            yield ("paragraph", Paragraph(child, document))
+        elif child.tag == qn("w:tbl"):
+            yield ("table", Table(child, document))
+
+
+def test_rich_body_renders_markdown_as_word_formatting(tmp_path) -> None:
+    """A markdown body renders as real Word formatting, not literal markup.
+
+    The section body carries a bold label, a ``##`` sub-heading, ``*`` bullets,
+    and a markdown table. The produced document must contain: no literal ``**``
+    in any paragraph text, a Heading 2/3 sub-heading for the ``## Sub Heading``
+    line, ``List Bullet`` paragraphs for the items, a run whose text is the bold
+    label (marked bold), and an extra real table for the markdown table.
+    """
+
+    body = "\n".join(
+        [
+            "**Bold Label:** intro text with *emphasis*.",
+            "",
+            "## Sub Heading",
+            "",
+            "* item one",
+            "* item two",
+            "",
+            "| Feature | Value |",
+            "| --- | --- |",
+            "| Speed | Fast |",
+            "| Cost | Low |",
+        ]
+    )
+    sections = [{"heading": "Overview", "level": 1, "body": body}]
+
+    output_path = tmp_path / "rich.docx"
+    builder = DocumentBuilder("1F4E79")
+    written = builder.build(
+        title="Rich Body",
+        prepared_by="Tester",
+        sections=sections,
+        output_path=output_path,
+    )
+
+    document = Document(str(written))
+
+    # No literal markdown asterisks leak into any paragraph text.
+    for paragraph in document.paragraphs:
+        assert "**" not in paragraph.text
+
+    # The "## Sub Heading" line becomes a Heading 2/3 sub-heading paragraph.
+    subheadings = [
+        p
+        for p in document.paragraphs
+        if p.style is not None
+        and p.style.name in ("Heading 2", "Heading 3")
+        and p.text == "Sub Heading"
+    ]
+    assert len(subheadings) >= 1
+
+    # The bullet items render as List Bullet paragraphs.
+    bullet_texts = [
+        p.text
+        for p in document.paragraphs
+        if p.style is not None and p.style.name == "List Bullet"
+    ]
+    assert "item one" in bullet_texts
+    assert "item two" in bullet_texts
+
+    # The bold label renders as a run marked bold with the markers stripped.
+    bold_runs = [
+        run.text
+        for p in document.paragraphs
+        for run in p.runs
+        if run.font.bold
+    ]
+    assert "Bold Label:" in bold_runs
+
+    # The markdown table renders as an additional real Word table containing the
+    # parsed header and data cells.
+    assert len(document.tables) >= 1
+    markdown_tables = [
+        table
+        for table in document.tables
+        if table.rows and [c.text for c in table.rows[0].cells] == ["Feature", "Value"]
+    ]
+    assert len(markdown_tables) == 1
+    rendered = markdown_tables[0]
+    data_cells = {c.text for row in rendered.rows[1:] for c in row.cells}
+    assert {"Speed", "Fast", "Cost", "Low"} <= data_cells
+
+
+def test_cover_and_toc_share_first_page_single_page_break(tmp_path) -> None:
+    """The cover block and TOC share page 1; content starts after one page break.
+
+    The cover no longer emits its own page break, so exactly one page break (the
+    one after the table of contents) precedes the first content section. The
+    cover-block paragraphs (title, date, "Prepared by") and the TOC entries must
+    all precede that first page break.
+    """
+
+    sections = [
+        {
+            "heading": "First Section",
+            "level": 1,
+            "body": "Body text.",
+            "bullets": ["A point"],
+            "table": {"headers": ["Metric"], "rows": [["Value"]]},
+        }
+    ]
+
+    output_path = tmp_path / "pagination.docx"
+    builder = DocumentBuilder("1F4E79")
+    written = builder.build(
+        title="Pagination Report",
+        prepared_by="Tester",
+        sections=sections,
+        output_path=output_path,
+    )
+
+    document = Document(str(written))
+
+    # Exactly one rendered page break exists in the body (the one after the TOC).
+    body_xml = document.element.body.xml
+    assert body_xml.count('w:type="page"') == 1
+
+    # Collect the ordered text of paragraphs up to (and excluding) the paragraph
+    # that carries the page break.
+    from docx.oxml.ns import qn
+
+    texts_before_break = []
+    saw_break = False
+    for kind, item in _iter_block_items(document):
+        if kind != "paragraph":
+            continue
+        if item._p.findall(".//" + qn("w:br")):
+            # A paragraph containing a page break marks the boundary; the break
+            # itself lives at the end of the last cover/TOC content.
+            saw_break = True
+            texts_before_break.append(item.text)
+            break
+        texts_before_break.append(item.text)
+
+    assert saw_break
+
+    # The cover block and the TOC entries all appear before the first content
+    # section begins on the next page.
+    assert "Pagination Report" in texts_before_break
+    assert any("Prepared by:" in t for t in texts_before_break)
+    assert "Table of Contents" in texts_before_break
+    assert "First Section" in texts_before_break

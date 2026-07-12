@@ -7,9 +7,10 @@ set of section payloads into a polished Microsoft Word deliverable via
 
 Every generated document contains (Req 10.1):
 
-- a **cover page** with the document title (styled in the theme color), the
+- a **cover block** with the document title (styled in the theme color), the
   generation date (formatted ``Month DD, YYYY``), and a "Prepared by" line,
-  followed by a page break;
+  followed by a thin divider and the table of contents on the same first page
+  (a single page break after the TOC starts the first content section);
 - a **table of contents** inserted as a Word ``TOC`` field, with the document
   settings ``w:updateFields`` flag set so Word refreshes the field on open;
 - **styled headings** (``Heading 1``/``Heading 2``) whose run font color is the
@@ -29,6 +30,7 @@ the injected logger, and never raises.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
@@ -58,6 +60,23 @@ _DATE_FORMAT = "%B %d, %Y"
 # The Word style names relied upon for structural guarantees.
 _TABLE_STYLE = "Table Grid"
 _BULLET_STYLE = "List Bullet"
+_NUMBER_STYLE = "List Number"
+
+# The bullet markers recognized at the start of a body line.
+_BULLET_MARKERS = ("*", "-", "\u2022")
+
+# Matches a numbered-list line, e.g. "1. First item" -> content "First item".
+_NUMBERED_RE = re.compile(r"^\d+\.\s+(?P<content>.*)$")
+
+# Matches a markdown-table separator cell, e.g. "---", ":--", ":-:" (dashes with
+# optional leading/trailing colons).
+_TABLE_SEPARATOR_CELL_RE = re.compile(r"^:?-{1,}:?$")
+
+# Matches a ``**bold**`` span (non-greedy) for inline markdown parsing.
+_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
+
+# Matches an ``*italic*`` or ``_italic_`` span (non-greedy) for inline parsing.
+_ITALIC_RE = re.compile(r"\*(.+?)\*|_(.+?)_")
 
 # The TOC field instruction (headings levels 1-3) inserted for the table of contents.
 _TOC_INSTRUCTION = ' TOC \\o "1-3" \\h \\z \\u '
@@ -223,7 +242,13 @@ class DocumentBuilder:
     def _add_cover_page(
         self, document: Document, *, title: str, prepared_by: str
     ) -> None:
-        """Render the cover page and a trailing page break (Req 10.1).
+        """Render the cover block (title, date, "Prepared by") on page 1 (Req 10.1).
+
+        The cover no longer emits its own trailing page break. Instead it adds a
+        small centered divider/spacer so the cover block and the table of
+        contents (rendered next) sit together on the first page. The single page
+        break that starts the first content section on a fresh page is emitted
+        after the table of contents (see :meth:`_add_table_of_contents`).
 
         Args:
             document: The document being assembled.
@@ -246,7 +271,12 @@ class DocumentBuilder:
         prepared_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
         prepared_paragraph.add_run(f"Prepared by: {prepared_by}")
 
-        document.add_page_break()
+        # A thin, tasteful divider separating the cover block from the TOC so the
+        # two share page 1 (rather than the cover consuming an entire page).
+        divider_paragraph = document.add_paragraph()
+        divider_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        divider_run = divider_paragraph.add_run("\u2014\u2014\u2014")
+        divider_run.font.color.rgb = RGBColor.from_string(self.theme_color)
 
     def _compute_toc_entries(
         self, sections: Sequence[Mapping[str, Any]]
@@ -371,7 +401,7 @@ class DocumentBuilder:
 
         body = section.get("body")
         if body:
-            document.add_paragraph(str(body))
+            self._add_rich_body(document, str(body))
 
         rendered_bullets = False
         bullets = section.get("bullets")
@@ -395,6 +425,301 @@ class DocumentBuilder:
                 rendered_table = True
 
         return rendered_table, rendered_bullets
+
+    # ------------------------------------------------------------------
+    # Rich body rendering (markdown -> real Word formatting)
+    # ------------------------------------------------------------------
+
+    def _add_rich_body(self, document: Document, text: str) -> None:
+        """Render a markdown-ish body string as real Word formatting.
+
+        The body returned by the LLM commonly contains lightweight markdown:
+        ``#`` headings, ``*``/``-``/``•`` bullets, ``1.`` numbered items, pipe
+        tables, and inline ``**bold**``/``*italic*`` spans. Inserting that verbatim
+        as one plain paragraph exposes raw markup to the reader. This helper parses
+        the text line-by-line and renders each block with the appropriate Word
+        construct instead:
+
+        - a line of 1-4 leading ``#`` characters becomes a styled sub-heading
+          (``##`` and below map to Heading 2, ``###``/``####`` to Heading 3);
+        - ``*``/``-``/``•`` bullet lines become ``List Bullet`` paragraphs;
+        - ``<n>.`` lines become ``List Number`` paragraphs (falling back to
+          ``List Bullet`` when the numbered style is unavailable);
+        - a contiguous block of pipe-delimited rows with a dashes separator row
+          becomes a real Word table via :meth:`_add_table`; and
+        - any other non-empty line becomes a body paragraph with inline
+          ``**bold**`` / ``*italic*`` markers converted to run formatting.
+
+        The parser is fully self-contained (no new dependencies), tolerates
+        arbitrary text, and never raises: anything that does not match a
+        recognized block is rendered as a plain paragraph.
+
+        Args:
+            document: The document being assembled.
+            text: The raw body text to render.
+        """
+
+        lines = text.split("\n")
+        total = len(lines)
+        index = 0
+        while index < total:
+            stripped = lines[index].strip()
+
+            # Blank lines separate blocks and carry no content.
+            if not stripped:
+                index += 1
+                continue
+
+            # Markdown table: a contiguous run of pipe-delimited rows.
+            if stripped.startswith("|") and stripped.endswith("|"):
+                block: list[str] = []
+                cursor = index
+                while cursor < total:
+                    candidate = lines[cursor].strip()
+                    if candidate.startswith("|") and candidate.endswith("|"):
+                        block.append(candidate)
+                        cursor += 1
+                    else:
+                        break
+                if len(block) >= 2 and self._try_add_markdown_table(document, block):
+                    index = cursor
+                    continue
+                # Not a valid table; fall through and treat this line as a paragraph.
+
+            # Markdown sub-heading (## / ### ...).
+            heading_level = self._markdown_heading_level(stripped)
+            if heading_level is not None:
+                content = self._strip_wrapping_bold(stripped.lstrip("#").strip())
+                self._add_styled_heading(document, content, level=heading_level)
+                index += 1
+                continue
+
+            # Bullet line.
+            if self._is_bullet_line(stripped):
+                content = stripped[1:].strip()
+                paragraph = self._add_body_paragraph(document, style=_BULLET_STYLE)
+                self._add_inline_runs(paragraph, content)
+                index += 1
+                continue
+
+            # Numbered line.
+            numbered = _NUMBERED_RE.match(stripped)
+            if numbered is not None:
+                paragraph = self._add_body_paragraph(document, style=_NUMBER_STYLE)
+                self._add_inline_runs(paragraph, numbered.group("content").strip())
+                index += 1
+                continue
+
+            # Normal paragraph with inline markdown.
+            paragraph = document.add_paragraph()
+            self._add_inline_runs(paragraph, self._strip_wrapping_bold(stripped))
+            index += 1
+
+    @staticmethod
+    def _markdown_heading_level(line: str) -> int | None:
+        """Return the sub-heading level for a markdown heading line, else ``None``.
+
+        A line beginning with one to four ``#`` characters is treated as a
+        sub-heading. ``#``/``##`` map to Heading level 2 and ``###``/``####`` to
+        Heading level 3 so that section-level headings remain dominant (Heading 1
+        is never produced from body markdown).
+
+        Args:
+            line: The already-stripped body line.
+
+        Returns:
+            ``2`` or ``3`` for a recognized heading, or ``None`` otherwise.
+        """
+
+        hash_count = len(line) - len(line.lstrip("#"))
+        if not 1 <= hash_count <= 4:
+            return None
+        remainder = line[hash_count:]
+        # Require the hashes to be followed by whitespace (or be the whole line),
+        # so tokens like "#tag" are not misread as headings.
+        if remainder and not remainder[0].isspace():
+            return None
+        return 2 if hash_count <= 2 else 3
+
+    @staticmethod
+    def _is_bullet_line(line: str) -> bool:
+        """Return whether ``line`` starts with a bullet marker followed by a space.
+
+        Args:
+            line: The already-stripped body line.
+
+        Returns:
+            ``True`` when the line begins with ``*``, ``-`` or ``•`` and a space
+            (so ``**bold**`` intro lines are not mistaken for bullets).
+        """
+
+        return len(line) >= 2 and line[0] in _BULLET_MARKERS and line[1] == " "
+
+    def _add_body_paragraph(self, document: Document, *, style: str) -> Any:
+        """Add an empty body paragraph in ``style``, falling back to bullets.
+
+        Args:
+            document: The document being assembled.
+            style: The desired Word paragraph style name.
+
+        Returns:
+            The created paragraph. If ``style`` is unavailable in the template,
+            the paragraph is created with the ``List Bullet`` style instead.
+        """
+
+        try:
+            return document.add_paragraph(style=style)
+        except KeyError:
+            return document.add_paragraph(style=_BULLET_STYLE)
+
+    def _try_add_markdown_table(self, document: Document, block: Sequence[str]) -> bool:
+        """Attempt to render a markdown pipe-table ``block`` as a Word table.
+
+        The block must be a header row, a separator row of dashes/colons, and
+        zero or more data rows. Cells are parsed by splitting on ``|`` and
+        trimming; the separator row is dropped. When the block does not look like
+        a valid table (no separator row, or no header cells) the method makes no
+        changes and returns ``False`` so the caller can fall back to paragraphs.
+
+        Args:
+            document: The document being assembled.
+            block: The contiguous pipe-delimited lines (each already stripped and
+                starting/ending with ``|``).
+
+        Returns:
+            ``True`` when a table was rendered, ``False`` otherwise.
+        """
+
+        rows = [self._parse_table_row(line) for line in block]
+        if len(rows) < 2 or not self._is_separator_row(rows[1]):
+            return False
+        headers = rows[0]
+        if not headers:
+            return False
+        data_rows = rows[2:]
+        self._add_table(document, headers, data_rows)
+        return True
+
+    @staticmethod
+    def _parse_table_row(line: str) -> list[str]:
+        """Split a pipe-delimited table row into trimmed cell values.
+
+        Args:
+            line: A row that starts and ends with ``|`` (e.g. ``"| a | b |"``).
+
+        Returns:
+            The trimmed inner cell values (leading/trailing empty splits removed).
+        """
+
+        return [cell.strip() for cell in line.split("|")[1:-1]]
+
+    @staticmethod
+    def _is_separator_row(cells: Sequence[str]) -> bool:
+        """Return whether ``cells`` form a markdown table separator row.
+
+        Args:
+            cells: The parsed cell values of a candidate separator row.
+
+        Returns:
+            ``True`` when every cell matches a dashes/colons pattern (e.g.
+            ``---``, ``:--``, ``:-:``) and there is at least one cell.
+        """
+
+        return bool(cells) and all(
+            _TABLE_SEPARATOR_CELL_RE.fullmatch(cell) is not None for cell in cells
+        )
+
+    @staticmethod
+    def _strip_wrapping_bold(text: str) -> str:
+        """Strip a single pair of ``**`` markers that wrap the whole ``text``.
+
+        This handles lines like ``"**Key Benefits:**"`` used as pseudo-headings,
+        leaving inner ``**`` spans (handled by the inline parser) untouched.
+
+        Args:
+            text: The text to unwrap.
+
+        Returns:
+            ``text`` without a single enclosing ``**...**`` pair, when present.
+        """
+
+        candidate = text.strip()
+        if len(candidate) >= 4 and candidate.startswith("**") and candidate.endswith("**"):
+            return candidate[2:-2].strip()
+        return text
+
+    def _add_inline_runs(self, paragraph: Any, text: str) -> None:
+        """Add ``text`` to ``paragraph`` converting inline ``**bold``/``*italic*``.
+
+        Balanced ``**...**`` spans become bold runs and ``*...*``/``_..._`` spans
+        become italic runs; the markers themselves are stripped. Text outside any
+        span is added as plain runs. When ``text`` contains no markers it is added
+        as a single plain run.
+
+        Args:
+            paragraph: The paragraph to append runs to.
+            text: The (block-level markers already removed) text to render.
+        """
+
+        for segment, bold, italic in self._parse_inline(text):
+            if segment == "":
+                continue
+            run = paragraph.add_run(segment)
+            if bold:
+                run.font.bold = True
+            if italic:
+                run.font.italic = True
+
+    def _parse_inline(self, text: str) -> list[tuple[str, bool, bool]]:
+        """Parse inline markdown into ``(segment, bold, italic)`` tuples.
+
+        The text is first split on ``**bold**`` spans; each resulting fragment is
+        then split on ``*italic*``/``_italic_`` spans. Bold spans may themselves
+        contain italic spans.
+
+        Args:
+            text: The text to parse.
+
+        Returns:
+            The ordered list of ``(segment_text, is_bold, is_italic)`` tuples.
+        """
+
+        segments: list[tuple[str, bool, bool]] = []
+        position = 0
+        for match in _BOLD_RE.finditer(text):
+            if match.start() > position:
+                for piece, italic in self._split_italic(text[position : match.start()]):
+                    segments.append((piece, False, italic))
+            for piece, italic in self._split_italic(match.group(1)):
+                segments.append((piece, True, italic))
+            position = match.end()
+        if position < len(text):
+            for piece, italic in self._split_italic(text[position:]):
+                segments.append((piece, False, italic))
+        return segments
+
+    @staticmethod
+    def _split_italic(text: str) -> list[tuple[str, bool]]:
+        """Split ``text`` on ``*italic*``/``_italic_`` spans.
+
+        Args:
+            text: The (bold-free) fragment to split.
+
+        Returns:
+            An ordered list of ``(segment_text, is_italic)`` tuples.
+        """
+
+        pieces: list[tuple[str, bool]] = []
+        position = 0
+        for match in _ITALIC_RE.finditer(text):
+            if match.start() > position:
+                pieces.append((text[position : match.start()], False))
+            inner = match.group(1) if match.group(1) is not None else match.group(2)
+            pieces.append((inner, True))
+            position = match.end()
+        if position < len(text):
+            pieces.append((text[position:], False))
+        return pieces
 
     # ------------------------------------------------------------------
     # Structural helpers
