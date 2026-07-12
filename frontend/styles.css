@@ -15,7 +15,7 @@
  * section headings. Body and summary copy stay in a clean readable sans.
  *
  * All motion (panel entrances, running pulse, scanline sweep, blinking caret,
- * state transitions) is subtle and FULLY disabled under
+ * typewriter, glow bursts, toasts) is subtle and FULLY disabled under
  * prefers-reduced-motion.
  */
 
@@ -155,6 +155,9 @@ body {
 .hud-banner-row {
   display: flex;
   justify-content: center;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
 }
 
 .hud-status-pill {
@@ -170,6 +173,58 @@ body {
   box-shadow: 0 0 10px -2px var(--accent-glow), inset 0 0 8px -4px var(--accent-glow);
 }
 
+/* Boot reveal: the SYSTEM ONLINE pill blinks in on first load. */
+.hud-status-pill.booting {
+  animation: pill-blink 900ms step-end 3;
+}
+
+/* Live backend status pill (populated from /health). */
+.backend-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--muted);
+  padding: 5px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background-color: var(--bg-2);
+}
+
+.backend-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background-color: var(--status-skipped);
+  box-shadow: 0 0 0 2px var(--bg);
+  transition: background-color var(--transition-speed) ease,
+    box-shadow var(--transition-speed) ease;
+}
+
+.backend-status.is-online {
+  color: var(--status-done);
+  border-color: var(--status-done);
+}
+
+.backend-status.is-online .backend-status-dot {
+  background-color: var(--status-done);
+  box-shadow: 0 0 8px 0 rgba(79, 157, 105, 0.6);
+  animation: pulse 1800ms ease-in-out infinite;
+}
+
+.backend-status.is-offline {
+  color: var(--status-failed);
+  border-color: var(--status-failed);
+}
+
+.backend-status.is-offline .backend-status-dot {
+  background-color: var(--status-failed);
+  box-shadow: 0 0 8px 0 rgba(198, 91, 91, 0.6);
+}
+
 .app-title {
   margin: 0;
   font-family: var(--mono);
@@ -179,6 +234,15 @@ body {
   text-transform: uppercase;
   color: var(--text);
   text-shadow: 0 0 18px rgba(255, 176, 0, 0.20);
+}
+
+/* Typewriter caret shown while the boot reveal is typing. */
+.app-title.typing::after,
+.app-description.typing::after {
+  content: "\2582";
+  color: var(--accent);
+  margin-left: 2px;
+  animation: blink 700ms step-end infinite;
 }
 
 .hud-divider {
@@ -206,6 +270,7 @@ body {
   max-width: 560px;
   color: var(--muted);
   font-size: 1rem;
+  min-height: 1.55em;
 }
 
 /* Console input */
@@ -253,6 +318,32 @@ body {
 .request-input:disabled {
   opacity: 0.6;
   cursor: not-allowed;
+}
+
+/* Input meta row: rotating hint + live character counter. */
+.input-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.input-hint {
+  color: var(--muted);
+}
+
+.char-counter {
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.char-counter.over-cap {
+  color: var(--accent);
 }
 
 .submit-button {
@@ -443,7 +534,159 @@ body {
   border-width: 0 2px 2px 0;
 }
 
-/* Timeline */
+/* ----- Run stats HUD ---------------------------------------------------- */
+
+.run-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+  gap: 14px;
+  margin-bottom: 18px;
+}
+
+.stat-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  background-color: var(--bg-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+}
+
+.stat-cell-run {
+  grid-column: 1 / -1;
+}
+
+.stat-label {
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.stat-value {
+  font-family: var(--mono);
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.stat-run-id {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.9rem;
+}
+
+/* Small HUD action buttons (copy, etc.) */
+.mini-button {
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--accent);
+  background-color: transparent;
+  border: 1px solid var(--accent-line);
+  border-radius: var(--radius);
+  padding: 3px 8px;
+  cursor: pointer;
+  transition: border-color var(--transition-speed) ease,
+    box-shadow var(--transition-speed) ease, color var(--transition-speed) ease;
+}
+
+.mini-button:hover {
+  border-color: var(--accent);
+  box-shadow: 0 0 10px -3px var(--accent-glow);
+}
+
+.mini-button.copied {
+  color: var(--status-done);
+  border-color: var(--status-done);
+}
+
+.mini-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Progress bar: solid amber fill on a neutral track (NO gradient). */
+.progress {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.progress-track {
+  flex: 1 1 auto;
+  height: 10px;
+  background-color: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  width: 0%;
+  background-color: var(--accent);
+  box-shadow: 0 0 12px 0 var(--accent-glow);
+  border-radius: 999px;
+  transition: width var(--transition-speed) ease;
+}
+
+.progress-label {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.14em;
+  color: var(--accent);
+  min-width: 3.2em;
+  text-align: right;
+}
+
+/* Phase-tinted stat value for the phase cell. */
+.stat-value.phase-complete {
+  color: var(--status-done);
+}
+
+.stat-value.phase-partial {
+  color: var(--accent);
+}
+
+.stat-value.phase-failed {
+  color: var(--status-failed);
+}
+
+/* ----- Timeline --------------------------------------------------------- */
+
+.timeline-wrap {
+  position: relative;
+  padding-left: 6px;
+}
+
+/* Vertical rail behind the steps; a solid amber overlay fills to progress. */
+.timeline-rail {
+  position: absolute;
+  left: 6px;
+  top: 10px;
+  bottom: 10px;
+  width: 2px;
+  background-color: var(--border-strong);
+  border-radius: 2px;
+  pointer-events: none;
+}
+
+.timeline-rail-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 0%;
+  background-color: var(--accent);
+  box-shadow: 0 0 10px 0 var(--accent-glow);
+  border-radius: 2px;
+  transition: height var(--transition-speed) ease;
+}
 
 .timeline-list {
   list-style: none;
@@ -509,6 +752,19 @@ body {
   color: var(--muted);
   padding-left: 10px;
   border-left: 2px solid var(--border-strong);
+}
+
+/* Per-step duration chip, shown once a step settles. */
+.step-duration {
+  display: inline-block;
+  margin-top: 6px;
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.1em;
+  color: var(--muted);
+  padding: 2px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
 }
 
 /* Step states (functional colors only) */
@@ -597,6 +853,12 @@ body {
   color: var(--accent);
 }
 
+.reasoning-bar-tools {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .reasoning-bar-dot {
   width: 8px;
   height: 8px;
@@ -623,6 +885,31 @@ body {
   box-shadow: inset 0 0 30px -22px var(--accent-glow);
 }
 
+/* Color-coded log lines by event type (functional colors, monospace kept). */
+.log-line {
+  display: block;
+}
+
+.log-line.log-planning {
+  color: var(--accent);
+}
+
+.log-line.log-done {
+  color: var(--status-done);
+}
+
+.log-line.log-failed {
+  color: var(--status-failed);
+}
+
+.log-line.log-reflection {
+  color: var(--accent);
+}
+
+.log-line.log-muted {
+  color: var(--muted);
+}
+
 /* Blinking caret at the tail of the terminal readout. */
 .reasoning-output::after {
   content: "\25AE";
@@ -639,16 +926,37 @@ body {
   margin: 0 0 8px;
 }
 
+.result-status::before {
+  margin-right: 8px;
+}
+
 .result-status.status-completed {
   color: var(--status-done);
+}
+
+.result-status.status-completed::before {
+  content: "\2714";
 }
 
 .result-status.status-partial {
   color: var(--accent);
 }
 
+.result-status.status-partial::before {
+  content: "\26A0";
+}
+
 .result-status.status-failed {
   color: var(--status-failed);
+}
+
+.result-status.status-failed::before {
+  content: "\2716";
+}
+
+/* One-time amber glow burst when a run completes. */
+.result-card.burst {
+  animation: glow-burst 1100ms ease-out 1;
 }
 
 .result-summary {
@@ -687,6 +995,13 @@ body {
   border-color: var(--status-skipped);
 }
 
+.result-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+}
+
 .download-button {
   display: inline-block;
   padding: 13px 28px;
@@ -719,6 +1034,134 @@ body {
   outline-offset: 2px;
 }
 
+/* Secondary "open in new tab" link, outlined amber. */
+.open-tab-button {
+  display: inline-block;
+  padding: 13px 22px;
+  font-family: var(--mono);
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  font-size: 0.82rem;
+  color: var(--accent);
+  background-color: transparent;
+  border: 1px solid var(--accent-line);
+  border-radius: var(--radius);
+  text-decoration: none;
+  transition: border-color var(--transition-speed) ease,
+    box-shadow var(--transition-speed) ease;
+}
+
+.open-tab-button::before {
+  content: "\2197  ";
+}
+
+.open-tab-button:hover {
+  border-color: var(--accent);
+  box-shadow: 0 0 16px -4px var(--accent-glow);
+}
+
+.open-tab-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Ghost (outlined neutral) buttons: copy summary, new run. */
+.ghost-button {
+  padding: 12px 22px;
+  font-family: var(--mono);
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  font-size: 0.82rem;
+  color: var(--text);
+  background-color: transparent;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: border-color var(--transition-speed) ease,
+    color var(--transition-speed) ease, box-shadow var(--transition-speed) ease;
+}
+
+.ghost-button:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  box-shadow: 0 0 16px -5px var(--accent-glow);
+}
+
+.ghost-button.copied {
+  color: var(--status-done);
+  border-color: var(--status-done);
+}
+
+.ghost-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* ----- Toasts ----------------------------------------------------------- */
+
+.toast-container {
+  position: fixed;
+  top: 18px;
+  right: 18px;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 320px;
+  pointer-events: none;
+}
+
+.toast {
+  pointer-events: auto;
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  letter-spacing: 0.06em;
+  color: var(--text);
+  background-color: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-left-width: 3px;
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  box-shadow: 0 6px 22px -10px rgba(0, 0, 0, 0.8);
+  animation: toast-in var(--transition-speed) ease both;
+}
+
+.toast.toast-out {
+  animation: toast-out var(--transition-speed) ease both;
+}
+
+.toast-title {
+  display: block;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  font-size: 0.68rem;
+  color: var(--accent);
+  margin-bottom: 2px;
+}
+
+.toast.toast-info {
+  border-left-color: var(--accent);
+}
+
+.toast.toast-success {
+  border-left-color: var(--status-done);
+}
+
+.toast.toast-success .toast-title {
+  color: var(--status-done);
+}
+
+.toast.toast-error {
+  border-left-color: var(--status-failed);
+}
+
+.toast.toast-error .toast-title {
+  color: var(--status-failed);
+}
+
 /* ----- Motion ----------------------------------------------------------- */
 
 @keyframes pulse {
@@ -728,6 +1171,16 @@ body {
   }
   50% {
     opacity: 0.35;
+  }
+}
+
+@keyframes pill-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.2;
   }
 }
 
@@ -769,6 +1222,41 @@ body {
   }
 }
 
+@keyframes glow-burst {
+  0% {
+    box-shadow: 0 0 0 1px var(--accent), 0 0 0 0 var(--accent-glow);
+  }
+  40% {
+    box-shadow: 0 0 0 1px var(--accent), 0 0 40px 6px var(--accent-glow);
+  }
+  100% {
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35),
+      inset 0 0 24px -18px var(--accent-glow);
+  }
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateX(16px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes toast-out {
+  from {
+    opacity: 1;
+    transform: translateX(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateX(16px);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -779,5 +1267,11 @@ body {
 
   .hud-scanline {
     display: none;
+  }
+
+  /* No typewriter caret and no glow burst under reduced motion. */
+  .app-title.typing::after,
+  .app-description.typing::after {
+    content: none;
   }
 }

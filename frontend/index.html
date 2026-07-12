@@ -12,17 +12,25 @@
     <!-- Fixed sweeping scanline overlay (decorative, pointer-events none) -->
     <div class="hud-scanline" aria-hidden="true"></div>
 
+    <!-- Transient toast stack (top-right). Populated by app.js. -->
+    <div class="toast-container" id="toast-container" aria-live="polite" aria-atomic="false"></div>
+
     <main class="console" role="main">
       <!-- Idle state: centered input, one-line description, example chips -->
       <section class="idle" id="idle-panel" aria-labelledby="app-title">
         <div class="idle-inner">
           <header class="hud-banner">
             <div class="hud-banner-row">
-              <span class="hud-status-pill" aria-hidden="true">&#9677; SYSTEM ONLINE</span>
+              <span class="hud-status-pill" id="boot-pill" aria-hidden="true">&#9677; SYSTEM ONLINE</span>
+              <!-- Live backend status pill; updated from /health by app.js. -->
+              <span class="backend-status" id="backend-status" role="status" aria-live="polite">
+                <span class="backend-status-dot" id="backend-status-dot" aria-hidden="true"></span>
+                <span class="backend-status-text" id="backend-status-text">&bull; CONNECTING</span>
+              </span>
             </div>
-            <h1 class="app-title" id="app-title" data-hud-label="// AUTONOMOUS AGENT SERVICE">Autonomous Agent Service</h1>
+            <h1 class="app-title" id="app-title" data-hud-label="// AUTONOMOUS AGENT SERVICE" data-typewriter="Autonomous Agent Service">Autonomous Agent Service</h1>
             <div class="hud-divider" aria-hidden="true"></div>
-            <p class="app-description" id="app-description">
+            <p class="app-description" id="app-description" data-typewriter="Describe a business document and the agent will plan, draft, self-check, and deliver a polished Word (.docx) file.">
               Describe a business document and the agent will plan, draft, self-check, and deliver a polished Word (.docx) file.
             </p>
           </header>
@@ -38,6 +46,10 @@
               placeholder="Describe the document you need…"
               aria-describedby="app-description"
             ></textarea>
+            <div class="input-meta" aria-hidden="true">
+              <span class="input-hint" id="input-hint">&#9099; Ctrl/&#8984;+Enter to launch</span>
+              <span class="char-counter" id="char-counter">0 / 2000</span>
+            </div>
 
             <button class="submit-button" id="submit-button" type="submit">
               Launch agent
@@ -61,12 +73,56 @@
         </div>
       </section>
 
-      <!-- Run state: timeline, assumptions, reasoning log, result card -->
+      <!-- Run state: stats HUD, timeline, assumptions, reasoning log, result card -->
       <section class="run" id="run-panel" aria-label="Agent run">
+        <!-- Compact run stats HUD, hidden until a run is submitted. -->
+        <div class="run-stats hud-panel" id="run-stats" hidden aria-live="polite">
+          <div class="run-stats-grid">
+            <div class="stat-cell">
+              <span class="stat-label">PHASE</span>
+              <span class="stat-value" id="stat-phase">STANDBY</span>
+            </div>
+            <div class="stat-cell">
+              <span class="stat-label">ELAPSED</span>
+              <span class="stat-value" id="stat-elapsed">00:00</span>
+            </div>
+            <div class="stat-cell">
+              <span class="stat-label">DONE</span>
+              <span class="stat-value" id="stat-done">0</span>
+            </div>
+            <div class="stat-cell">
+              <span class="stat-label">FAILED</span>
+              <span class="stat-value" id="stat-failed">0</span>
+            </div>
+            <div class="stat-cell">
+              <span class="stat-label">TOTAL</span>
+              <span class="stat-value" id="stat-total">0</span>
+            </div>
+            <div class="stat-cell stat-cell-run">
+              <span class="stat-label">RUN ID</span>
+              <span class="stat-value stat-run-id">
+                <span id="stat-run-id">—</span>
+                <button type="button" class="mini-button" id="copy-run-id" title="Copy full run id">COPY</button>
+              </span>
+            </div>
+          </div>
+          <div class="progress" id="run-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+            <div class="progress-track">
+              <div class="progress-fill" id="progress-fill"></div>
+            </div>
+            <span class="progress-label" id="progress-label">0%</span>
+          </div>
+        </div>
+
         <!-- Plan_Step timeline, hidden until a run is submitted (Req 11.2) -->
         <div class="timeline hud-panel" id="timeline" hidden aria-live="polite">
           <h2 class="section-heading" data-hud-prefix="&#9646;">Plan timeline</h2>
-          <ol class="timeline-list" id="timeline-list"></ol>
+          <div class="timeline-wrap">
+            <div class="timeline-rail" aria-hidden="true">
+              <div class="timeline-rail-fill" id="timeline-rail-fill"></div>
+            </div>
+            <ol class="timeline-list" id="timeline-list"></ol>
+          </div>
         </div>
 
         <!-- Assumptions panel (Req 11.6) -->
@@ -79,7 +135,10 @@
         <section class="reasoning hud-panel" id="reasoning-log" hidden aria-label="Agent reasoning log">
           <div class="reasoning-bar" aria-hidden="true">
             <span class="reasoning-bar-title">AGENT LOG</span>
-            <span class="reasoning-bar-dot"></span>
+            <span class="reasoning-bar-tools">
+              <button type="button" class="mini-button" id="copy-log" title="Copy full log">COPY LOG</button>
+              <span class="reasoning-bar-dot"></span>
+            </span>
           </div>
           <h2 class="section-heading visually-hidden">Reasoning log</h2>
           <pre class="reasoning-output" id="reasoning-output" tabindex="0"></pre>
@@ -91,7 +150,12 @@
           <p class="result-status" id="result-status"></p>
           <p class="result-summary" id="result-summary"></p>
           <div class="result-steps" id="result-steps"></div>
-          <a class="download-button" id="download-button" href="#" hidden>Download .docx</a>
+          <div class="result-actions">
+            <a class="download-button" id="download-button" href="#" hidden>Download .docx</a>
+            <a class="open-tab-button" id="open-tab-button" href="#" target="_blank" rel="noopener" hidden>Open in new tab</a>
+            <button type="button" class="ghost-button" id="copy-summary">Copy summary</button>
+            <button type="button" class="ghost-button" id="new-run-button">New run</button>
+          </div>
         </section>
       </section>
     </main>
