@@ -1,32 +1,53 @@
 /*
- * Mission-control theme for the Autonomous Agent Service (Req 11.8).
+ * Command-deck HUD theme for the Autonomous Agent Service (Req 11.8).
  *
- * Dark aesthetic with EXACTLY one decorative accent color: amber (#FFB000).
- * Only 2-3 neutral tones are used. A monospace typeface is reserved for the
- * agent reasoning log. Functional status colors (done/failed/skipped) are used
- * purely to convey step state, never as a second decorative accent. There are
- * no violet/magenta hues and no gradient fills anywhere. Motion on state
- * transitions is subtle (150-400ms) and fully disabled under
+ * A futuristic sci-fi "mission control" console. Deep near-black surfaces,
+ * thin technical borders, and amber inset/outer glows create depth WITHOUT
+ * any gradient fills. Depth comes from solid colors, borders, box-shadow
+ * glows, and an SVG data-URI grid pattern.
+ *
+ * There is EXACTLY one decorative accent color: amber (#FFB000). Functional
+ * status colors (done = green, failed = red, skipped = muted) convey step
+ * state only and are never used decoratively. There are no violet/magenta
+ * hues and no gradient fills anywhere in this file.
+ *
+ * A techy monospace stack is used for the reasoning log AND for HUD labels /
+ * section headings. Body and summary copy stay in a clean readable sans.
+ *
+ * All motion (panel entrances, running pulse, scanline sweep, blinking caret,
+ * state transitions) is subtle and FULLY disabled under
  * prefers-reduced-motion.
  */
 
 :root {
-  /* Neutrals (2-3 dark tones + text) */
-  --bg: #0e0f12;
-  --surface: #16181d;
-  --text: #e6e7ea;
-  --muted: #8a8f98;
-  --border: #262a31;
+  /* Neutrals (deep command-deck tones + text) */
+  --bg: #07080a;
+  --bg-2: #0b0d11;
+  --surface: #0f1216;
+  --surface-2: #12151b;
+  --text: #e8eaee;
+  --muted: #838a95;
+  --border: #20252d;
+  --border-strong: #2b323c;
 
-  /* Single decorative accent */
-  --accent: #ffb000;
+  /* Single decorative accent: amber */
+  --accent: #FFB000;
+  --accent-soft: rgba(255, 176, 0, 0.14);
+  --accent-line: rgba(255, 176, 0, 0.30);
+  --accent-glow: rgba(255, 176, 0, 0.35);
 
   /* Functional status colors (not decorative) */
   --status-done: #4f9d69;
   --status-failed: #c65b5b;
   --status-skipped: #6b7079;
 
-  --radius: 8px;
+  /* Techy monospace stack (HUD labels + reasoning log) */
+  --mono: "JetBrains Mono", "SFMono-Regular", ui-monospace, Menlo, Consolas,
+    monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica,
+    Arial, sans-serif;
+
+  --radius: 4px;
   --space: 16px;
   --transition-speed: 250ms;
 }
@@ -43,21 +64,54 @@ body {
 }
 
 body {
+  position: relative;
   background-color: var(--bg);
   color: var(--text);
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica,
-    Arial, sans-serif;
-  line-height: 1.5;
+  font-family: var(--sans);
+  line-height: 1.55;
   -webkit-font-smoothing: antialiased;
+  min-height: 100%;
+}
+
+/* ----- Fixed HUD backdrop layers --------------------------------------- */
+
+/* Faint amber grid drawn from an SVG data-URI (NOT a CSS gradient). */
+.hud-grid {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  opacity: 0.06;
+  background-color: transparent;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='48' height='48'%3E%3Cpath d='M48 0H0V48' fill='none' stroke='%23FFB000' stroke-width='1'/%3E%3C/svg%3E");
+  background-repeat: repeat;
+  background-position: center;
+}
+
+/* Thin amber line that slowly sweeps down the viewport. */
+.hud-scanline {
+  position: fixed;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 2px;
+  z-index: 1;
+  pointer-events: none;
+  background-color: var(--accent);
+  opacity: 0.10;
+  box-shadow: 0 0 12px 1px var(--accent-glow);
+  animation: sweep 9s linear infinite;
 }
 
 .console {
-  max-width: 960px;
+  position: relative;
+  z-index: 2;
+  max-width: 980px;
   margin: 0 auto;
-  padding: 48px 24px;
+  padding: 56px 24px 72px;
   display: flex;
   flex-direction: column;
-  gap: 32px;
+  gap: 36px;
 }
 
 .visually-hidden {
@@ -77,52 +131,123 @@ body {
 .idle {
   display: flex;
   justify-content: center;
-  padding-top: 8vh;
+  padding-top: 6vh;
 }
 
 .idle-inner {
   width: 100%;
-  max-width: 640px;
+  max-width: 680px;
   text-align: center;
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: 28px;
+}
+
+/* HUD banner header */
+
+.hud-banner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+}
+
+.hud-banner-row {
+  display: flex;
+  justify-content: center;
+}
+
+.hud-status-pill {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--accent);
+  padding: 5px 14px;
+  border: 1px solid var(--accent-line);
+  border-radius: 999px;
+  background-color: var(--accent-soft);
+  box-shadow: 0 0 10px -2px var(--accent-glow), inset 0 0 8px -4px var(--accent-glow);
 }
 
 .app-title {
   margin: 0;
-  font-size: 2rem;
-  font-weight: 600;
-  letter-spacing: 0.02em;
+  font-family: var(--mono);
+  font-size: 1.9rem;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--text);
+  text-shadow: 0 0 18px rgba(255, 176, 0, 0.20);
+}
+
+.hud-divider {
+  width: 100%;
+  max-width: 460px;
+  height: 1px;
+  background-color: var(--border-strong);
+  position: relative;
+}
+
+.hud-divider::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 90px;
+  height: 3px;
+  background-color: var(--accent);
+  box-shadow: 0 0 10px 0 var(--accent-glow);
 }
 
 .app-description {
-  margin: 0;
+  margin: 0 auto;
+  max-width: 560px;
   color: var(--muted);
   font-size: 1rem;
 }
+
+/* Console input */
 
 .request-form {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  text-align: left;
+}
+
+.hud-field-label {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--accent);
 }
 
 .request-input {
   width: 100%;
   padding: 16px;
-  font-size: 1.05rem;
+  font-size: 1.02rem;
   color: var(--text);
   background-color: var(--surface);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-strong);
   border-radius: var(--radius);
   resize: vertical;
-  font-family: inherit;
+  font-family: var(--mono);
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.3);
+  transition: border-color var(--transition-speed) ease,
+    box-shadow var(--transition-speed) ease;
+}
+
+.request-input::placeholder {
+  color: var(--muted);
 }
 
 .request-input:focus {
   outline: none;
   border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent-line), 0 0 16px -2px var(--accent-glow);
 }
 
 .request-input:disabled {
@@ -131,35 +256,56 @@ body {
 }
 
 .submit-button {
-  align-self: center;
-  padding: 12px 28px;
-  font-size: 1rem;
-  font-weight: 600;
+  align-self: flex-start;
+  padding: 13px 34px;
+  font-family: var(--mono);
+  font-size: 0.9rem;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
   color: var(--bg);
   background-color: var(--accent);
-  border: none;
+  border: 1px solid var(--accent);
   border-radius: var(--radius);
   cursor: pointer;
-  transition: opacity var(--transition-speed) ease;
+  box-shadow: 0 0 14px -3px var(--accent-glow);
+  transition: box-shadow var(--transition-speed) ease,
+    transform var(--transition-speed) ease, opacity var(--transition-speed) ease;
+}
+
+.submit-button::before {
+  content: "\25B8  ";
 }
 
 .submit-button:hover {
-  opacity: 0.9;
+  box-shadow: 0 0 22px 0 var(--accent-glow);
+  transform: translateY(-1px);
+}
+
+.submit-button:active {
+  transform: translateY(0);
 }
 
 .submit-button:disabled {
-  opacity: 0.5;
+  opacity: 0.45;
   cursor: not-allowed;
+  box-shadow: none;
 }
+
+/* Preset chips as outlined HUD cards with corner ticks */
 
 .chips {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
 }
 
 .chip {
-  padding: 12px 16px;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px 16px;
   font-size: 0.9rem;
   text-align: left;
   color: var(--text);
@@ -167,11 +313,62 @@ body {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   cursor: pointer;
-  transition: border-color var(--transition-speed) ease;
+  transition: border-color var(--transition-speed) ease,
+    box-shadow var(--transition-speed) ease, transform var(--transition-speed) ease;
+}
+
+.chip-label {
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.chip-text {
+  color: var(--text);
+}
+
+/* Corner ticks (top-left + bottom-right) drawn with pseudo-element borders. */
+.chip::before,
+.chip::after {
+  content: "";
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  border-color: var(--accent-line);
+  border-style: solid;
+  opacity: 0.7;
+  transition: border-color var(--transition-speed) ease, opacity var(--transition-speed) ease;
+}
+
+.chip::before {
+  top: 6px;
+  left: 6px;
+  border-width: 1px 0 0 1px;
+}
+
+.chip::after {
+  bottom: 6px;
+  right: 6px;
+  border-width: 0 1px 1px 0;
 }
 
 .chip:hover {
   border-color: var(--accent);
+  box-shadow: 0 0 16px -4px var(--accent-glow);
+  transform: translateY(-1px);
+}
+
+.chip:hover::before,
+.chip:hover::after {
+  border-color: var(--accent);
+  opacity: 1;
+}
+
+.chip:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .error-banner {
@@ -180,8 +377,11 @@ body {
   color: var(--status-failed);
   background-color: var(--surface);
   border: 1px solid var(--status-failed);
+  border-left-width: 3px;
   border-radius: var(--radius);
   text-align: left;
+  font-family: var(--mono);
+  font-size: 0.85rem;
 }
 
 /* ----- Run state -------------------------------------------------------- */
@@ -189,25 +389,58 @@ body {
 .run {
   display: flex;
   flex-direction: column;
-  gap: 24px;
+  gap: 26px;
 }
 
 .section-heading {
-  margin: 0 0 12px;
-  font-size: 0.85rem;
+  margin: 0 0 14px;
+  font-family: var(--mono);
+  font-size: 0.78rem;
   text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--muted);
+  letter-spacing: 0.16em;
+  color: var(--accent);
 }
 
-.timeline,
-.assumptions,
-.reasoning,
-.result-card {
+.section-heading[data-hud-prefix]::before {
+  content: attr(data-hud-prefix) " ";
+  color: var(--accent);
+  margin-right: 4px;
+}
+
+/* Shared HUD panel treatment: flat surface, thin border, subtle glow. */
+.hud-panel {
+  position: relative;
   background-color: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 20px;
+  padding: 22px;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35),
+    inset 0 0 24px -18px var(--accent-glow);
+  animation: panel-in var(--transition-speed) ease both;
+}
+
+/* Corner brackets on the main panels (top-left + bottom-right). */
+.hud-panel::before,
+.hud-panel::after {
+  content: "";
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  border-color: var(--accent-line);
+  border-style: solid;
+  pointer-events: none;
+}
+
+.hud-panel::before {
+  top: -1px;
+  left: -1px;
+  border-width: 2px 0 0 2px;
+}
+
+.hud-panel::after {
+  bottom: -1px;
+  right: -1px;
+  border-width: 0 2px 2px 0;
 }
 
 /* Timeline */
@@ -215,31 +448,45 @@ body {
 .timeline-list {
   list-style: none;
   margin: 0;
-  padding: 0;
+  padding: 0 0 0 6px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 0;
 }
 
 .timeline-step {
+  position: relative;
   display: flex;
-  gap: 14px;
-  padding: 14px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background-color: var(--bg);
+  gap: 16px;
+  padding: 16px 14px 16px 18px;
+  border-left: 1px solid var(--border-strong);
   transition: border-color var(--transition-speed) ease,
-    transform var(--transition-speed) ease, opacity var(--transition-speed) ease;
+    transform var(--transition-speed) ease, opacity var(--transition-speed) ease,
+    background-color var(--transition-speed) ease;
+}
+
+/* Connecting vertical rail is the border-left above; round the ends. */
+.timeline-step:first-child {
+  border-top-left-radius: var(--radius);
+}
+
+.timeline-step:last-child {
+  border-bottom-left-radius: var(--radius);
 }
 
 .step-badge {
+  position: relative;
   flex: 0 0 auto;
-  width: 12px;
-  height: 12px;
-  margin-top: 5px;
+  width: 14px;
+  height: 14px;
+  margin-top: 4px;
+  margin-left: -25px;
   border-radius: 50%;
-  background-color: var(--muted);
-  transition: background-color var(--transition-speed) ease;
+  background-color: var(--bg);
+  border: 2px solid var(--muted);
+  box-shadow: 0 0 0 3px var(--bg);
+  transition: background-color var(--transition-speed) ease,
+    border-color var(--transition-speed) ease, box-shadow var(--transition-speed) ease;
 }
 
 .step-body {
@@ -257,74 +504,138 @@ body {
 
 .step-detail {
   margin-top: 8px;
-  font-size: 0.85rem;
-  color: var(--text);
+  font-size: 0.82rem;
+  font-family: var(--mono);
+  color: var(--muted);
+  padding-left: 10px;
+  border-left: 2px solid var(--border-strong);
 }
 
 /* Step states (functional colors only) */
 
+.timeline-step.state-pending .step-badge {
+  background-color: transparent;
+  border-color: var(--muted);
+}
+
 .timeline-step.state-running {
-  border-color: var(--accent);
+  border-left-color: var(--accent);
+  background-color: var(--accent-soft);
 }
 
 .timeline-step.state-running .step-badge {
   background-color: var(--accent);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--bg), 0 0 12px 1px var(--accent-glow);
   animation: pulse 1200ms ease-in-out infinite;
+}
+
+.timeline-step.state-done {
+  border-left-color: var(--status-done);
 }
 
 .timeline-step.state-done .step-badge {
   background-color: var(--status-done);
+  border-color: var(--status-done);
 }
 
 .timeline-step.state-failed {
-  border-color: var(--status-failed);
+  border-left-color: var(--status-failed);
 }
 
 .timeline-step.state-failed .step-badge {
   background-color: var(--status-failed);
+  border-color: var(--status-failed);
 }
 
 .timeline-step.state-skipped {
-  opacity: 0.55;
+  opacity: 0.5;
+}
+
+.timeline-step.state-skipped .step-title {
+  text-decoration: line-through;
 }
 
 .timeline-step.state-skipped .step-badge {
   background-color: var(--status-skipped);
+  border-color: var(--status-skipped);
 }
 
 /* Assumptions */
 
 .assumptions-list {
   margin: 0;
-  padding-left: 20px;
+  padding-left: 18px;
   color: var(--text);
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
 }
 
-/* Reasoning log — monospace (Req 11.8) */
+.assumptions-list li::marker {
+  color: var(--accent);
+}
+
+/* Reasoning log — terminal readout, monospace (Req 11.8) */
+
+.reasoning-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  margin: 0 0 12px;
+  background-color: var(--bg-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+}
+
+.reasoning-bar-title {
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.reasoning-bar-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background-color: var(--accent);
+  box-shadow: 0 0 8px 0 var(--accent-glow);
+  animation: pulse 1600ms ease-in-out infinite;
+}
 
 .reasoning-output {
+  position: relative;
   margin: 0;
   padding: 16px;
-  max-height: 280px;
+  max-height: 300px;
   overflow-y: auto;
   background-color: var(--bg);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-strong);
   border-radius: var(--radius);
-  font-family: "JetBrains Mono", "SFMono-Regular", ui-monospace, Menlo,
-    Consolas, monospace;
+  font-family: var(--mono);
   font-size: 0.85rem;
   color: var(--muted);
   white-space: pre-wrap;
   word-break: break-word;
+  box-shadow: inset 0 0 30px -22px var(--accent-glow);
+}
+
+/* Blinking caret at the tail of the terminal readout. */
+.reasoning-output::after {
+  content: "\25AE";
+  color: var(--accent);
+  animation: blink 1100ms step-end infinite;
 }
 
 /* Result card */
 
 .result-status {
-  font-weight: 600;
+  font-family: var(--mono);
+  font-weight: 700;
+  letter-spacing: 0.06em;
   margin: 0 0 8px;
 }
 
@@ -354,7 +665,8 @@ body {
 
 .result-step-badge {
   padding: 4px 10px;
-  font-size: 0.8rem;
+  font-family: var(--mono);
+  font-size: 0.76rem;
   border-radius: var(--radius);
   border: 1px solid var(--border);
   color: var(--muted);
@@ -377,17 +689,34 @@ body {
 
 .download-button {
   display: inline-block;
-  padding: 12px 24px;
-  font-weight: 600;
+  padding: 13px 28px;
+  font-family: var(--mono);
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  font-size: 0.85rem;
   color: var(--bg);
   background-color: var(--accent);
+  border: 1px solid var(--accent);
   border-radius: var(--radius);
   text-decoration: none;
-  transition: opacity var(--transition-speed) ease;
+  box-shadow: 0 0 14px -3px var(--accent-glow);
+  transition: box-shadow var(--transition-speed) ease,
+    transform var(--transition-speed) ease;
+}
+
+.download-button::before {
+  content: "\2B07  ";
 }
 
 .download-button:hover {
-  opacity: 0.9;
+  box-shadow: 0 0 22px 0 var(--accent-glow);
+  transform: translateY(-1px);
+}
+
+.download-button:focus-visible {
+  outline: 2px solid var(--text);
+  outline-offset: 2px;
 }
 
 /* ----- Motion ----------------------------------------------------------- */
@@ -398,7 +727,45 @@ body {
     opacity: 1;
   }
   50% {
-    opacity: 0.4;
+    opacity: 0.35;
+  }
+}
+
+@keyframes blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
+
+@keyframes sweep {
+  0% {
+    transform: translateY(-4px);
+    opacity: 0;
+  }
+  8% {
+    opacity: 0.10;
+  }
+  92% {
+    opacity: 0.10;
+  }
+  100% {
+    transform: translateY(100vh);
+    opacity: 0;
+  }
+}
+
+@keyframes panel-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
   }
 }
 
@@ -408,5 +775,9 @@ body {
   *::after {
     animation: none !important;
     transition: none !important;
+  }
+
+  .hud-scanline {
+    display: none;
   }
 }
