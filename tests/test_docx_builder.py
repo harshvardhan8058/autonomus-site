@@ -23,12 +23,18 @@ import json
 
 import pytest
 from docx import Document
-from docx.shared import RGBColor
+from docx.shared import Inches, RGBColor
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
 from app.core.logging import StructuredLogger
-from app.services.docx_builder import DEFAULT_THEME_COLOR, DocumentBuilder
+from app.services.docx_builder import (
+    _CHARS_PER_PAGE,
+    _HEADING_CHAR_OVERHEAD,
+    _SECTION_CHAR_OVERHEAD,
+    DEFAULT_THEME_COLOR,
+    DocumentBuilder,
+)
 
 # --- Strategies -------------------------------------------------------------
 
@@ -429,6 +435,175 @@ def test_toc_cached_page_numbers_are_content_length_based(tmp_path) -> None:
     naive_max = 2 + (len(sections) - 1)
     assert max(cached_numbers) < naive_max
     assert max(cached_numbers) <= len(sections)
+
+
+def _estimate_section_chars_for_test(section: dict) -> int:
+    """Independently estimate a section's rendered character count.
+
+    Mirrors :meth:`DocumentBuilder._estimate_section_chars` for real sections
+    (heading overhead + heading text + body + bullets + per-section overhead), so
+    a test can compute the expected page span without reaching into the builder.
+    """
+
+    chars = _HEADING_CHAR_OVERHEAD + len(str(section.get("heading", "") or ""))
+    body = section.get("body")
+    if isinstance(body, str):
+        chars += len(body)
+    bullets = section.get("bullets")
+    if isinstance(bullets, (list, tuple)):
+        for bullet in bullets:
+            chars += len(str(bullet))
+    return chars + _SECTION_CHAR_OVERHEAD
+
+
+def _read_cached_toc_numbers(document) -> list[int]:
+    """Collect the cached page numbers from the TOC entry paragraphs.
+
+    A TOC entry is a non-heading paragraph carrying a tab followed by the cached
+    page number.
+    """
+
+    numbers: list[int] = []
+    for paragraph in document.paragraphs:
+        if paragraph.style is not None and paragraph.style.name.startswith("Heading"):
+            continue
+        text = paragraph.text
+        if "\t" not in text:
+            continue
+        trailing = text.split("\t")[-1].strip()
+        if trailing.isdigit():
+            numbers.append(int(trailing))
+    return numbers
+
+
+def test_toc_cached_page_numbers_never_overshoot_content_page_count(tmp_path) -> None:
+    """No cached TOC number exceeds ``1 + N`` for content estimated at N pages.
+
+    Regression test for the off-by-one cap: content begins on page 2, so content
+    occupying N pages ends on page ``N + 1``. The cap must therefore keep every
+    cached TOC number at or below ``1 + N`` (previously it allowed ``2 + N``,
+    which overshot the real last page by one). PAGEREF fields remain so Word
+    still fills exact pages on open.
+    """
+
+    # Sections large enough to span several estimated pages; each carries a
+    # bullet so no synthesized "Key Considerations" entry is appended.
+    body = "Lorem ipsum dolor sit amet. " * 120  # ~3360 chars each
+    sections = [
+        {
+            "heading": f"Chapter {n}",
+            "level": 1,
+            "body": body,
+            "bullets": ["A concise point"],
+        }
+        for n in range(1, 4)
+    ]
+
+    output_path = tmp_path / "overshoot.docx"
+    builder = DocumentBuilder("1F4E79")
+    written = builder.build(
+        title="Overshoot Guard",
+        prepared_by="Tester",
+        sections=sections,
+        output_path=output_path,
+    )
+
+    document = Document(str(written))
+    cached_numbers = _read_cached_toc_numbers(document)
+    assert len(cached_numbers) == len(sections)
+
+    # Independently compute N, the number of content pages the estimate spans.
+    total_chars = sum(_estimate_section_chars_for_test(s) for s in sections)
+    estimated_pages = max(1, -(-total_chars // _CHARS_PER_PAGE))
+
+    # The cap must never overshoot the real last content page (page ``1 + N``).
+    assert max(cached_numbers) <= 1 + estimated_pages
+    # And it stays monotonic non-decreasing, starting on page 2.
+    assert cached_numbers[0] == 2
+    assert all(
+        earlier <= later
+        for earlier, later in zip(cached_numbers, cached_numbers[1:], strict=False)
+    )
+
+
+def test_document_uses_one_inch_section_margins(tmp_path) -> None:
+    """The document applies explicit 1-inch margins on its section(s) (Req 10).
+
+    A consistent 1-inch margin on all four edges gives the deliverable a clean,
+    professional single-column layout independent of template defaults.
+    """
+
+    builder = DocumentBuilder("1F4E79")
+    output_path = tmp_path / "margins.docx"
+    written = builder.build(
+        title="Margins Report",
+        prepared_by="Tester",
+        sections=[{"heading": "Section", "body": "Body", "bullets": ["Point"]}],
+        output_path=output_path,
+    )
+
+    document = Document(str(written))
+    for section in document.sections:
+        assert section.top_margin == Inches(1)
+        assert section.bottom_margin == Inches(1)
+        assert section.left_margin == Inches(1)
+        assert section.right_margin == Inches(1)
+
+
+def test_table_header_row_is_bold_and_shaded(tmp_path) -> None:
+    """Table header cells render as bold, theme-shaded header cells (Req 10).
+
+    The header row must read as a real table header: each header cell contains a
+    bold run, and the cell carries a ``<w:shd>`` shading element filled with the
+    resolved theme color. Data rows remain plainly rendered.
+    """
+
+    from docx.oxml.ns import qn
+
+    theme = "1F4E79"
+    sections = [
+        {
+            "heading": "Metrics",
+            "level": 1,
+            "body": "Body.",
+            "bullets": ["A point"],
+            "table": {
+                "headers": ["Metric", "Value"],
+                "rows": [["Revenue", "High"], ["Cost", "Low"]],
+            },
+        }
+    ]
+
+    output_path = tmp_path / "table_header.docx"
+    builder = DocumentBuilder(theme)
+    written = builder.build(
+        title="Table Header Report",
+        prepared_by="Tester",
+        sections=sections,
+        output_path=output_path,
+    )
+
+    document = Document(str(written))
+    assert len(document.tables) >= 1
+    table = document.tables[0]
+    header_cells = table.rows[0].cells
+
+    # Every header cell has at least one bold run.
+    for cell in header_cells:
+        bold_runs = [
+            run for paragraph in cell.paragraphs for run in paragraph.runs if run.font.bold
+        ]
+        assert bold_runs, "expected a bold run in each header cell"
+
+    # At least one header cell carries a shading element filled with the theme
+    # color (case-insensitive comparison).
+    shaded = False
+    for cell in header_cells:
+        shd = cell._tc.get_or_add_tcPr().find(qn("w:shd"))
+        if shd is not None and (shd.get(qn("w:fill")) or "").upper() == theme.upper():
+            shaded = True
+            break
+    assert shaded, "expected a w:shd fill matching the theme color on a header cell"
 
 
 # --- Property 15 ------------------------------------------------------------

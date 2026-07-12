@@ -89,9 +89,11 @@ _TOC_INSTRUCTION = ' TOC \\o "1-3" \\h \\z \\u '
 
 # Approximate number of rendered body characters that fit on a single page. Used
 # only to compute a realistic *cached* TOC page number for each entry; Microsoft
-# Word recomputes the exact page numbers on open (``w:updateFields``). Chosen in
-# the 2600-3000 range for a typical single-column business page.
-_CHARS_PER_PAGE = 2800
+# Word recomputes the exact page numbers on open (``w:updateFields``). A
+# single-column business page with 1-inch margins holds roughly this many
+# characters, so cumulative content maps to fewer pages and the cached estimate
+# stops overshooting the real page count.
+_CHARS_PER_PAGE = 3600
 
 # Rough character overhead attributed to a rendered heading line (the heading
 # text plus its surrounding paragraph spacing) when estimating page positions.
@@ -241,6 +243,10 @@ class DocumentBuilder:
 
         document = Document()
 
+        # Apply consistent, professional 1-inch margins on every section for a
+        # clean single-column business layout.
+        self._apply_page_margins(document)
+
         # Each build produces a fresh document, so reset the bookmark id counter
         # used to give every section-heading bookmark a unique ``w:id``.
         self._bookmark_id = 0
@@ -299,6 +305,10 @@ class DocumentBuilder:
         break that starts the first content section on a fresh page is emitted
         after the table of contents (see :meth:`_add_table_of_contents`).
 
+        For a balanced, professional look the title paragraph carries vertical
+        space before it (so it is not jammed against the top margin) and the
+        date / "Prepared by" lines carry modest trailing spacing.
+
         Args:
             document: The document being assembled.
             title: The document title, styled in the theme color.
@@ -307,6 +317,10 @@ class DocumentBuilder:
 
         title_paragraph = document.add_paragraph()
         title_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        # Add breathing room above the title so it is not jammed against the top
+        # margin, giving the cover block a more balanced, professional look.
+        title_paragraph.paragraph_format.space_before = Pt(36)
+        title_paragraph.paragraph_format.space_after = Pt(18)
         title_run = title_paragraph.add_run(title)
         title_run.bold = True
         title_run.font.size = Pt(28)
@@ -314,10 +328,12 @@ class DocumentBuilder:
 
         date_paragraph = document.add_paragraph()
         date_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        date_paragraph.paragraph_format.space_after = Pt(6)
         date_paragraph.add_run(datetime.now().strftime(_DATE_FORMAT))
 
         prepared_paragraph = document.add_paragraph()
         prepared_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        prepared_paragraph.paragraph_format.space_after = Pt(12)
         prepared_paragraph.add_run(f"Prepared by: {prepared_by}")
 
         # A thin, tasteful divider separating the cover block from the TOC so the
@@ -392,8 +408,10 @@ class DocumentBuilder:
 
         The estimate is defensive: it never raises, tolerates missing or oversized
         fields, and caps each number so the last entry cannot exceed ``2 +
-        total_estimated_pages``. On any unexpected error it falls back to the
-        monotonic ``index + 2`` estimate.
+        max(0, total_estimated_pages - 1)`` (i.e. ``total_estimated_pages + 1``).
+        Because content begins on page 2, that cap equals the real last content
+        page and never overshoots it. On any unexpected error it falls back to
+        the monotonic ``index + 2`` estimate.
 
         Args:
             sections: The ordered section payloads that will be rendered.
@@ -413,7 +431,12 @@ class DocumentBuilder:
             total_chars = sum(sizes)
             # ``ceil`` of the total content over the per-page capacity, at least 1.
             total_pages = max(1, -(-total_chars // _CHARS_PER_PAGE))
-            max_page = 2 + total_pages
+            # Content starts on page 2, so if content occupies ``total_pages``
+            # pages the LAST page is ``2 + total_pages - 1`` (== ``total_pages +
+            # 1``). Capping at that value ensures a cached entry can never
+            # overshoot the real last content page (e.g. a 3-content-page
+            # document caps entries at page 4, not 5).
+            max_page = 2 + max(0, total_pages - 1)
 
             numbers: list[int] = []
             cumulative = 0
@@ -495,6 +518,12 @@ class DocumentBuilder:
         The entries are emitted in the same order as the bookmarked section
         headings, so entry ``i`` targets bookmark ``_Toc_{i}`` (Req 10.1).
 
+        After the entries (and after the closing ``end`` field character, but
+        before the single trailing page break) a small italic, muted caption is
+        added noting that Word refreshes the page numbers on open. The caption is
+        deliberately not a Heading style, so it is neither a section heading nor a
+        TOC entry.
+
         Args:
             document: The document being assembled.
             entries: The ordered ``(heading, level)`` list to render as the
@@ -546,6 +575,19 @@ class DocumentBuilder:
             last_paragraph = entry_paragraph
 
         self._append_fld_char(last_paragraph, "end")
+
+        # An honest, muted caption setting expectations: the cached numbers are a
+        # best-effort estimate, while Microsoft Word fills in the exact pages when
+        # the field is refreshed. Kept small and italic (and deliberately NOT a
+        # Heading style) so it is not mistaken for a section heading or a TOC
+        # entry, and so any preview-vs-Word discrepancy reads as intentional.
+        caption_paragraph = document.add_paragraph()
+        caption_run = caption_paragraph.add_run(
+            "Page numbers update automatically in Microsoft Word "
+            "(right-click the table of contents and choose Update Field)."
+        )
+        caption_run.font.italic = True
+        caption_run.font.size = Pt(8)
 
         document.add_page_break()
 
@@ -945,7 +987,15 @@ class DocumentBuilder:
         headers: Sequence[Any],
         rows: Sequence[Sequence[Any]],
     ) -> None:
-        """Add a bordered table with a header row and the supplied data rows.
+        """Add a bordered table with a styled header row and the data rows.
+
+        The header row reads as a real table header: each header cell's run is
+        bold with near-white text, and the cell is shaded with the resolved theme
+        color for contrast (via a ``<w:shd>`` OXML element). The visible ``Table
+        Grid`` style and the plain data-row rendering are preserved. Header
+        styling works for any column count and never raises, so both
+        section-provided tables and body markdown tables (which both flow through
+        this method) render consistently.
 
         Args:
             document: The document being assembled.
@@ -959,13 +1009,47 @@ class DocumentBuilder:
 
         header_cells = table.rows[0].cells
         for index, header in enumerate(headers):
-            header_cells[index].text = str(header)
+            cell = header_cells[index]
+            cell.text = str(header)
+            self._style_header_cell(cell)
 
         for row in rows:
             cells = table.add_row().cells
             for index in range(column_count):
                 value = row[index] if index < len(row) else ""
                 cells[index].text = str(value)
+
+    def _style_header_cell(self, cell: Any) -> None:
+        """Style a table header ``cell`` as a bold, theme-shaded header.
+
+        Applies a light theme-colored fill to the cell (a ``<w:shd>`` element on
+        the cell properties) and makes every run in the cell bold with near-white
+        text for contrast. Defensive: any unexpected failure is swallowed so a
+        header never breaks table rendering, and it works for any column count.
+
+        Args:
+            cell: The header row cell to style.
+        """
+
+        try:
+            # Bold, near-white text runs for contrast against the theme fill.
+            near_white = RGBColor(0xFF, 0xFF, 0xFF)
+            for paragraph in cell.paragraphs:
+                for run in paragraph.runs:
+                    run.font.bold = True
+                    run.font.color.rgb = near_white
+
+            # Shade the cell with the resolved theme color via OXML ``<w:shd>``.
+            cell_properties = cell._tc.get_or_add_tcPr()
+            shading = cell_properties.find(qn("w:shd"))
+            if shading is None:
+                shading = OxmlElement("w:shd")
+                cell_properties.append(shading)
+            shading.set(qn("w:val"), "clear")
+            shading.set(qn("w:color"), "auto")
+            shading.set(qn("w:fill"), self.theme_color)
+        except Exception:  # noqa: BLE001 - styling must never fail a build
+            return
 
     def _add_default_bullets(
         self,
@@ -1001,6 +1085,25 @@ class DocumentBuilder:
         ]
         for point in points:
             document.add_paragraph(point, style=_BULLET_STYLE)
+
+    @staticmethod
+    def _apply_page_margins(document: Document) -> None:
+        """Set explicit 1-inch margins on every section for a clean layout.
+
+        A consistent 1-inch margin on all four edges of each section gives the
+        deliverable a professional, single-column business appearance regardless
+        of the template defaults.
+
+        Args:
+            document: The document being assembled.
+        """
+
+        one_inch = Inches(1)
+        for section in document.sections:
+            section.top_margin = one_inch
+            section.bottom_margin = one_inch
+            section.left_margin = one_inch
+            section.right_margin = one_inch
 
     def _add_footer_page_number(self, document: Document) -> None:
         """Add a centered ``PAGE`` field to the primary section footer (Req 10.1).
