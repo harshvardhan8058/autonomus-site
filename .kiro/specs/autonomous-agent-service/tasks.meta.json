@@ -1,0 +1,85 @@
+{
+  "pbtResults": {
+    "2.3 Write property test that `.env.example` documents every Settings field": {
+      "status": "passed",
+      "lastRunTimestamp": 1783859840353
+    },
+    "3.3 Write property test for AgentRequest validation": {
+      "status": "passed",
+      "lastRunTimestamp": 1783859997524
+    },
+    "3.4 Write property test for Plan sequential numbering and step content": {
+      "status": "passed",
+      "lastRunTimestamp": 1783859998491
+    },
+    "3.5 Write property test for Plan JSON round-trip": {
+      "status": "passed",
+      "lastRunTimestamp": 1783859999294
+    },
+    "4.2 Write property test that logging failures never break a run": {
+      "status": "passed",
+      "lastRunTimestamp": 1783860184607
+    },
+    "4.3 Write property test that malicious rejection logs a hash, not the payload": {
+      "status": "passed",
+      "lastRunTimestamp": 1783860186962
+    },
+    "5.2 Write property test for the sliding-window limiter": {
+      "status": "passed",
+      "lastRunTimestamp": 1783860305731
+    },
+    "6.3 Write property test that emitted events are well-formed and typed": {
+      "status": "passed",
+      "lastRunTimestamp": 1783860528172
+    },
+    "6.4 Write property test that SSE streams are isolated per run": {
+      "status": "passed",
+      "lastRunTimestamp": 1783860529204
+    },
+    "7.3 Write property test for JSON repair correctness": {
+      "status": "passed",
+      "lastRunTimestamp": 1783860933979
+    },
+    "7.4 Write property test for bounded retries and fallback ordering": {
+      "status": "passed",
+      "lastRunTimestamp": 1783860935949
+    },
+    "7.5 Write property test for backend selection": {
+      "status": "passed",
+      "lastRunTimestamp": 1783860936027
+    },
+    "8.2 Write property test that status is never falsely completed": {
+      "status": "passed",
+      "lastRunTimestamp": 1783861081561
+    },
+    "8.3 Write property test for the completed iff condition": {
+      "status": "passed",
+      "lastRunTimestamp": 1783861082547
+    },
+    "8.4 Write property test that status is total, in-enum, and deterministic": {
+      "status": "passed",
+      "lastRunTimestamp": 1783861083359
+    },
+    "12.2 Write property test that generated documents parse and contain required structure": {
+      "status": "passed",
+      "lastRunTimestamp": 1783861800626
+    },
+    "12.3 Write property test for safe, total theme-color resolution": {
+      "status": "passed",
+      "lastRunTimestamp": 1783861802814
+    },
+    "13.2 Write property test for step lifecycle and failure continuation": {
+      "status": "passed",
+      "lastRunTimestamp": 1783862178696
+    },
+    "15.2 Write property test for the response contract": {
+      "status": "passed",
+      "lastRunTimestamp": 1783862641038
+    },
+    "17.5 Write property test for idempotent, isolated document retrieval": {
+      "status": "passed",
+      "lastRunTimestamp": 1783863459242
+    }
+  },
+  "executionHistory": {}
+}
