@@ -1,8 +1,8 @@
 """Guardrail request-intent classification (Req 1.3).
 
 This module defines :class:`GuardrailValidator`, the component that screens a
-schema-valid request by asking the LLM to classify its intent as exactly one of
-the three :class:`~app.models.schemas.IntentClass` values:
+schema-valid request and resolves its intent to exactly one of the three
+:class:`~app.models.schemas.IntentClass` values:
 
 - ``valid_document_request`` — the user wants any written document/deliverable
   produced (a report, brief, briefing, summary, overview, analysis, memo,
@@ -20,19 +20,32 @@ the three :class:`~app.models.schemas.IntentClass` values:
   a real-world or interactive action the service cannot do, or a content-free
   message.
 
+Classification proceeds in two stages:
+
+1. **Fast deterministic allow-list (no LLM):** the module-level helper
+   :func:`_looks_like_document_request` checks the request against a curated set
+   of document-type keywords. When a request clearly asks for a written document
+   (e.g. "Create a project proposal ...") it is resolved to
+   :attr:`IntentClass.VALID_DOCUMENT_REQUEST` immediately, without consulting the
+   LLM. This guarantees obvious document requests always pass and reduces LLM
+   dependence and latency.
+2. **LLM intent check for the rest:** requests that do not match the allow-list
+   are sent to :meth:`~app.services.llm.LLMService.complete_json` with a tiny
+   internal schema, so retries, JSON repair, and Groq -> Ollama fallback are
+   handled by the LLM service. A confident ``malicious`` or ``non_document``
+   result is honored and still rejects the request.
+
 Pydantic schema validation (a non-blank ``request`` string) is enforced at the
 API boundary, so by the time :meth:`GuardrailValidator.classify` runs the input
-is already a valid string (Req 1.1, 1.2). The classifier delegates to
-:meth:`~app.services.llm.LLMService.complete_json` with a tiny internal schema,
-so retries, JSON repair, and Groq -> Ollama fallback are handled by the LLM
-service.
+is already a valid string (Req 1.1, 1.2).
 
 On any classification uncertainty — an LLM/JSON failure, or output that does not
-map to a known intent — the validator applies a **conservative default**: it
-returns :attr:`IntentClass.NON_DOCUMENT` so that ambiguous or unparseable input
-is rejected rather than allowed through (Req 1.3). Note this failure default is
-distinct from the classification guidance itself, which biases toward
-``valid_document_request`` whenever a written document could satisfy the request.
+map to a known intent — the validator **fails OPEN**: it returns
+:attr:`IntentClass.VALID_DOCUMENT_REQUEST` rather than rejecting. The guardrail's
+job is to block confidently-malicious/non-document requests; when it cannot
+decide, blocking legitimate document work is the worse failure, so a transient
+model hiccup must never punish a legitimate request. Malicious and non-document
+requests are still rejected only when the model confidently says so.
 """
 
 from __future__ import annotations
@@ -41,6 +54,42 @@ from pydantic import BaseModel, Field
 
 from app.models.schemas import IntentClass
 from app.services.llm import LLMError, LLMService
+
+# Curated set of document-type keywords. When a request contains any of these
+# (case-insensitive substring match), it is treated as an obvious request for a
+# written deliverable and short-circuits to VALID_DOCUMENT_REQUEST without an
+# LLM call.
+_DOCUMENT_KEYWORDS: frozenset[str] = frozenset(
+    {
+        "proposal",
+        "report",
+        "brief",
+        "briefing",
+        "summary",
+        "plan",
+        "analysis",
+        "memo",
+        "overview",
+        "specification",
+        "spec",
+        "sop",
+        "minutes",
+        "white paper",
+        "whitepaper",
+        "document",
+        "deck",
+        "strategy",
+        "roadmap",
+        "case study",
+        "policy",
+        "business plan",
+        "project plan",
+        "product spec",
+        "one-pager",
+        "write-up",
+        "dossier",
+    }
+)
 
 _SYSTEM_PROMPT = (
     "You are a request-intent classifier for a service that writes and produces "
@@ -70,6 +119,26 @@ _SYSTEM_PROMPT = (
 )
 
 
+def _looks_like_document_request(request: str) -> bool:
+    """Return whether ``request`` clearly asks for a written document.
+
+    This is a fast, deterministic, LLM-free heuristic: the request is lowercased
+    and matched against the curated :data:`_DOCUMENT_KEYWORDS` set using simple
+    substring containment. When any document-type keyword is present, the request
+    is treated as an obvious document request that can bypass LLM classification.
+
+    Args:
+        request: The natural-language request to inspect.
+
+    Returns:
+        ``True`` if the request contains any document-type keyword, else
+        ``False``.
+    """
+
+    lowered = request.lower()
+    return any(keyword in lowered for keyword in _DOCUMENT_KEYWORDS)
+
+
 class _Classification(BaseModel):
     """Internal JSON schema for the guardrail classification response.
 
@@ -83,19 +152,28 @@ class _Classification(BaseModel):
 
 
 class GuardrailValidator:
-    """Classifies request intent via an LLM call (Req 1.3).
+    """Classifies request intent via an allow-list and LLM fallback (Req 1.3).
 
     The validator is the guardrail screening step between schema validation and
-    run execution. It uses :meth:`LLMService.complete_json` with a tiny enum
-    schema. The classification guidance is **permissive**: a request for any
-    written deliverable (report, brief, summary, analysis, plan, etc.) on any
-    topic — including implicit phrasings like "tell me about X" or "X in brief"
-    — is treated as :attr:`IntentClass.VALID_DOCUMENT_REQUEST`, and only
-    genuinely malicious requests or requests that clearly are not asking for a
-    written document are rejected. Independently of that guidance, the validator
-    defaults conservatively to :attr:`IntentClass.NON_DOCUMENT` on any LLM/JSON
-    failure or unresolvable output, so unparseable or uncertain input is rejected
-    rather than allowed through.
+    run execution. It resolves intent in two stages:
+
+    1. A fast **deterministic allow-list** (:func:`_looks_like_document_request`)
+       short-circuits obvious requests for a written deliverable (report, brief,
+       summary, proposal, plan, etc.) to
+       :attr:`IntentClass.VALID_DOCUMENT_REQUEST` without any LLM call.
+    2. For everything else, an **LLM intent check** via
+       :meth:`LLMService.complete_json` returns the model's intent; a confident
+       ``malicious`` or ``non_document`` result still rejects the request,
+       preserving the guardrail.
+
+    The classification guidance is otherwise **permissive**: a request for any
+    written deliverable on any topic — including implicit phrasings like "tell me
+    about X" or "X in brief" — is treated as
+    :attr:`IntentClass.VALID_DOCUMENT_REQUEST`. Crucially, on any LLM/JSON failure
+    or unresolvable output the validator **fails OPEN** and returns
+    :attr:`IntentClass.VALID_DOCUMENT_REQUEST` (no longer failing closed to
+    ``non_document``), so a transient model hiccup never rejects legitimate
+    document work.
 
     Attributes:
         _llm: The LLM service used to perform the classification call.
@@ -113,18 +191,27 @@ class GuardrailValidator:
     async def classify(self, request: str) -> IntentClass:
         """Classify ``request`` into exactly one :class:`IntentClass` value (Req 1.3).
 
-        The request is sent to the LLM through
-        :meth:`LLMService.complete_json`, constrained to the internal
-        :class:`_Classification` schema. The prompt biases toward
-        :attr:`IntentClass.VALID_DOCUMENT_REQUEST` for any request that could be
-        fulfilled by producing a written document on the topic (on any subject),
-        reserving ``malicious`` for harmful/abusive input and ``non_document``
-        for requests that plainly are not asking for a written deliverable.
-        Retries, JSON repair, and backend fallback are handled by the LLM
-        service. If the classification fails for any reason — an LLM/JSON error,
-        or output that does not resolve to a known intent — the method applies a
-        conservative default and returns :attr:`IntentClass.NON_DOCUMENT`, so
-        ambiguous or unparseable input is rejected rather than allowed through.
+        Resolution proceeds in two stages:
+
+        1. **Deterministic allow-list first (no LLM):** if
+           :func:`_looks_like_document_request` returns ``True`` — the request
+           contains a curated document-type keyword — the method returns
+           :attr:`IntentClass.VALID_DOCUMENT_REQUEST` immediately without calling
+           the LLM. This guarantees obvious document requests always pass and
+           reduces LLM dependence and latency.
+        2. **LLM classification otherwise:** the request is sent to
+           :meth:`LLMService.complete_json`, constrained to the internal
+           :class:`_Classification` schema. On success the model's intent is
+           returned, so a confident ``malicious`` or ``non_document`` result
+           still rejects the request. Retries, JSON repair, and backend fallback
+           are handled by the LLM service.
+
+        If the LLM classification fails for any reason — an ``LLMError`` /
+        ``LLMJSONError``, or output that does not resolve to a known
+        :class:`IntentClass` — the method **fails OPEN** and returns
+        :attr:`IntentClass.VALID_DOCUMENT_REQUEST`. Blocking legitimate document
+        work on uncertainty is the worse failure; malicious/non-document requests
+        are rejected only when the model confidently classifies them as such.
 
         Args:
             request: The schema-valid natural-language request to classify.
@@ -133,18 +220,25 @@ class GuardrailValidator:
             Exactly one of the three :class:`IntentClass` members.
         """
 
+        # Stage 1: fast deterministic allow-list — obvious document requests
+        # pass immediately without an LLM call.
+        if _looks_like_document_request(request):
+            return IntentClass.VALID_DOCUMENT_REQUEST
+
+        # Stage 2: LLM intent check for everything else.
         prompt = f"Classify the intent of the following request:\n\n{request}"
         try:
             result = await self._llm.complete_json(
                 prompt, _Classification, system=_SYSTEM_PROMPT
             )
         except LLMError:
-            # Any LLM/JSON failure is treated as a conservative rejection: we do
-            # not let unclassifiable input proceed as a valid document request.
-            return IntentClass.NON_DOCUMENT
+            # Fail OPEN: an LLM/JSON failure must not reject legitimate document
+            # work. The guardrail only blocks confidently malicious/non-document
+            # requests, so when we cannot decide we allow the request through.
+            return IntentClass.VALID_DOCUMENT_REQUEST
 
         if not isinstance(result.intent, IntentClass):
-            # Defensive: the schema guarantees an IntentClass, but guard against
-            # any unexpected value by defaulting conservatively.
-            return IntentClass.NON_DOCUMENT
+            # Defensive: the schema guarantees an IntentClass, but if the output
+            # does not resolve to a known intent, fail OPEN rather than reject.
+            return IntentClass.VALID_DOCUMENT_REQUEST
         return result.intent
