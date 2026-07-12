@@ -32,6 +32,7 @@ assembled sections to render into the final ``.docx`` deliverable.
 from __future__ import annotations
 
 import contextlib
+import re
 from pathlib import Path
 from typing import Any
 
@@ -61,6 +62,245 @@ _TOOL_RESEARCH = "research"
 _TOOL_DRAFT_SECTION = "draft_section"
 _TOOL_GENERATE_TABLE_DATA = "generate_table_data"
 _TOOL_BUILD_DOCX = "build_docx"
+
+# The heading used for the synthesized executive summary section.
+_EXECUTIVE_SUMMARY_TITLE = "Executive Summary"
+
+# The maximum number of characters of accumulated content fed as context when
+# synthesizing the executive summary, bounding the prompt size.
+_SUMMARY_CONTEXT_MAX_CHARS = 6000
+
+# The set of registered tool identifiers that must never surface as a
+# user-visible section heading (they are internal routing names, not titles).
+_KNOWN_TOOL_NAMES = frozenset(
+    {_TOOL_RESEARCH, _TOOL_DRAFT_SECTION, _TOOL_GENERATE_TABLE_DATA, _TOOL_BUILD_DOCX}
+)
+
+# The maximum number of characters of a title derived from a free-form
+# description, capped at a whole-word boundary (never mid-word).
+_DERIVED_TITLE_MAX_CHARS = 60
+
+# Delimiters that end the "leading clause" of a description when deriving a
+# concise section title from it.
+_CLAUSE_DELIMITERS = re.compile(r"[.;:\n]")
+
+# Leading imperative verb phrases stripped from a description before deriving a
+# noun-phrase heading. Ordered longest-first so multi-word phrases are matched
+# before their single-word prefixes (e.g. "draft the" before "draft").
+_LEADING_VERB_PHRASES: tuple[str, ...] = (
+    "gather information on",
+    "write the",
+    "create an",
+    "create a",
+    "draft the",
+    "generate a",
+    "prepare the",
+    "produce a",
+    "outline the",
+    "develop a",
+    "draft",
+    "generate",
+    "compile",
+    "assemble",
+    "research",
+)
+
+# Natural boundaries that end the noun phrase of a derived title. A comma or any
+# of these connectors terminates the heading so it reads as a clean noun phrase.
+_TITLE_BOUNDARY = re.compile(r",| of the | for the | that | which | to ")
+
+# Filler words stripped from the leading and trailing edges of a derived title.
+_TITLE_FILLER_WORDS = frozenset(
+    {"of", "for", "the", "and", "sections", "section"}
+)
+
+
+def _title_case(text: str) -> str:
+    """Capitalize the first letter of each whitespace-separated word.
+
+    Unlike :meth:`str.title`, the remainder of each word is left untouched, so
+    embedded capitals and apostrophes (e.g. acronyms or ``don't``) are preserved.
+
+    Args:
+        text: The text to title-case.
+
+    Returns:
+        The title-cased text.
+    """
+
+    return " ".join(
+        word[:1].upper() + word[1:] if word else word for word in text.split()
+    )
+
+
+def _smart_title_case(text: str) -> str:
+    """Title-case ``text``, capitalizing hyphen-separated sub-words too.
+
+    Behaves like :func:`_title_case` but also capitalizes the first letter of
+    each hyphen-delimited part, so a token like ``on-premise`` becomes
+    ``On-Premise`` while embedded capitals in acronyms are preserved.
+
+    Args:
+        text: The text to title-case.
+
+    Returns:
+        The hyphen-aware title-cased text.
+    """
+
+    def _cap_word(word: str) -> str:
+        return "-".join(
+            part[:1].upper() + part[1:] if part else part for part in word.split("-")
+        )
+
+    return " ".join(_cap_word(word) for word in text.split())
+
+
+def _strip_leading_verb_phrase(text: str) -> str:
+    """Strip a leading imperative verb phrase from ``text`` when present.
+
+    Args:
+        text: The clause to strip a leading verb phrase from.
+
+    Returns:
+        ``text`` with a recognized leading verb phrase removed, or the original
+        text when none matches.
+    """
+
+    lowered = text.lower()
+    for phrase in _LEADING_VERB_PHRASES:
+        if lowered == phrase:
+            return ""
+        if lowered.startswith(phrase + " "):
+            return text[len(phrase):].lstrip()
+    return text
+
+
+def _cap_at_word_boundary(text: str, max_chars: int) -> str:
+    """Truncate ``text`` to at most ``max_chars`` on a whole-word boundary.
+
+    A word is never cut in half: whole words are accumulated until the next word
+    would exceed ``max_chars``. When the very first word already exceeds the
+    limit it is kept in full rather than returning an empty string.
+
+    Args:
+        text: The text to cap.
+        max_chars: The maximum length in characters.
+
+    Returns:
+        The capped text.
+    """
+
+    if len(text) <= max_chars:
+        return text
+    kept: list[str] = []
+    length = 0
+    for word in text.split():
+        extra = len(word) + (1 if kept else 0)
+        if length + extra > max_chars:
+            break
+        kept.append(word)
+        length += extra
+    return " ".join(kept) if kept else text.split()[0]
+
+
+def _title_from_description(description: str) -> str:
+    """Derive a concise, professional heading from a step description.
+
+    The derivation never truncates mid-phrase. It takes the leading clause of
+    ``description`` (up to the first sentence/clause delimiter), strips a leading
+    imperative verb phrase (e.g. "write the", "create a"), keeps the remaining
+    noun phrase up to the first natural boundary (a comma or a connector such as
+    " of the " or " to "), strips leading/trailing filler words, caps the result
+    at :data:`_DERIVED_TITLE_MAX_CHARS` characters on a whole-word boundary, and
+    title-cases it.
+
+    Args:
+        description: The free-form step description.
+
+    Returns:
+        A concise, title-cased heading, or an empty string when ``description``
+        yields no usable text.
+    """
+
+    text = " ".join((description or "").split())
+    if not text:
+        return ""
+
+    # 1. Leading clause only (up to the first sentence/clause delimiter).
+    clause = _CLAUSE_DELIMITERS.split(text, maxsplit=1)[0].strip() or text
+    # 2. Strip a leading imperative verb phrase ("write the", "create a", ...).
+    clause = _strip_leading_verb_phrase(clause)
+    # 3. Keep the noun phrase up to the first natural boundary.
+    clause = _TITLE_BOUNDARY.split(clause, maxsplit=1)[0].strip()
+    # 4. Strip leading/trailing filler words.
+    words = clause.split()
+    while words and words[-1].lower().strip(".,;:!?") in _TITLE_FILLER_WORDS:
+        words.pop()
+    while words and words[0].lower().strip(".,;:!?") in _TITLE_FILLER_WORDS:
+        words.pop(0)
+    clause = " ".join(words)
+    # 5. Cap at a whole-word boundary and tidy trailing punctuation.
+    clause = _cap_at_word_boundary(clause, _DERIVED_TITLE_MAX_CHARS)
+    clause = clause.strip().rstrip(".,;:!?-\u2013\u2014")
+    return _smart_title_case(clause) if clause.strip() else ""
+
+
+def humanize_section_title(task: str, description: str, index: int) -> str:
+    """Build a human-readable section heading from a plan step (Req 10.1).
+
+    Section headings must be professional, title-cased titles rather than the
+    raw internal tool identifiers used for routing. When ``task`` is a
+    meaningful, non-tool-name value it is title-cased (underscores become
+    spaces); when ``task`` is one of the known tool names or is empty, a concise
+    noun-phrase title is derived from ``description`` (without mid-phrase
+    truncation); failing that, a positional ``"Section N"`` fallback is used.
+
+    This helper is the fallback used when a step does not carry an explicit
+    :attr:`~app.models.schemas.PlanStep.section_title`; callers prefer that
+    planner-provided title when it is present.
+
+    Args:
+        task: The plan step's ``task`` value (may be a bare tool name).
+        description: The plan step's free-form description.
+        index: The 1-based position used for the ``"Section N"`` fallback.
+
+    Returns:
+        A non-empty, human-readable, title-cased section heading.
+    """
+
+    normalized_task = (task or "").strip()
+    if normalized_task and normalized_task not in _KNOWN_TOOL_NAMES:
+        return _title_case(normalized_task.replace("_", " "))
+
+    derived = _title_from_description(description)
+    if derived:
+        return derived
+    return f"Section {index}"
+
+
+def section_heading_for_step(step: PlanStep, index: int) -> str:
+    """Resolve the document heading for ``step`` in priority order (Req 10.1).
+
+    The heading is chosen as:
+
+    1. ``step.section_title`` (stripped) when non-empty — the clean,
+       planner-provided professional heading;
+    2. otherwise :func:`humanize_section_title` derived from the step's ``task``
+       and ``description`` (never truncated mid-phrase);
+    3. otherwise the positional ``"Section N"`` fallback.
+
+    Args:
+        step: The plan step to derive a heading for.
+        index: The 1-based position used for the ``"Section N"`` fallback.
+
+    Returns:
+        A non-empty, human-readable section heading.
+    """
+
+    explicit = (step.section_title or "").strip()
+    if explicit:
+        return explicit
+    return humanize_section_title(step.task or "", step.description or "", index)
 
 # The default document title / prepared-by line used when building the .docx and
 # no better value can be derived from the Run state.
@@ -270,6 +510,10 @@ class Executor:
         )
 
         tool_name = self._resolve_tool_name(step, tool_names)
+        # Before assembling the final document, synthesize a genuine executive
+        # summary from the accumulated content and place it first (Req 10.1).
+        if tool_name == _TOOL_BUILD_DOCX:
+            await self._synthesize_executive_summary(sections, run_state)
         kwargs = self._build_kwargs(tool_name, step, run_state, sections)
         result, error = await self._invoke_with_retry(tool_name, kwargs, run_state, step)
 
@@ -348,7 +592,7 @@ class Executor:
             return {"spec": description or task}
         if tool_name == _TOOL_BUILD_DOCX:
             return {
-                "sections": list(sections),
+                "sections": self._sections_with_assumptions(sections, run_state),
                 "output_path": self._derive_output_path(run_state),
                 "title": self._derive_title(run_state),
                 "prepared_by": _DEFAULT_PREPARED_BY,
@@ -358,6 +602,132 @@ class Executor:
             "title": task or "Section",
             "context": description or task or run_state.request,
         }
+
+    @staticmethod
+    def _sections_with_assumptions(
+        sections: list[dict[str, Any]], run_state: RunState
+    ) -> list[dict[str, Any]]:
+        """Return the content sections plus a "Key Assumptions" bullet section.
+
+        When the Run recorded any planner assumptions, a dedicated
+        ``{"heading": "Key Assumptions", "bullets": [...]}`` section is appended
+        once after the content sections so the deliverable surfaces the agent's
+        assumptions as a genuine, non-duplicate bullet list. When there are no
+        assumptions the content sections are returned unchanged.
+
+        Args:
+            sections: The accumulated content section payloads.
+            run_state: The owning Run state (source of the assumptions).
+
+        Returns:
+            A new list of section payloads to pass to ``build_docx``.
+        """
+
+        result = list(sections)
+        assumptions = [
+            str(assumption).strip()
+            for assumption in (run_state.assumptions or [])
+            if str(assumption).strip()
+        ]
+        if assumptions:
+            result.append({"heading": "Key Assumptions", "bullets": assumptions})
+        return result
+
+    async def _synthesize_executive_summary(
+        self, sections: list[dict[str, Any]], run_state: RunState
+    ) -> None:
+        """Synthesize an executive summary from the drafted content (Req 10.1).
+
+        After all content steps have run and before ``build_docx`` assembles the
+        document, this produces a genuine executive summary of the whole
+        deliverable (rather than a generic one drafted before the other sections
+        existed). It concatenates the accumulated sections' headings and bodies
+        into a bounded context string, dispatches the existing ``draft_section``
+        tool to generate the summary prose, and inserts it as the FIRST section.
+
+        If the accumulated sections already contain an "Executive Summary"
+        (case-insensitive), that section's body is replaced with the synthesized
+        summary and it is moved to the front rather than duplicated.
+
+        The synthesis is strictly best-effort: it is a no-op when there is no
+        accumulated content, and any error (LLM failure, empty output) is caught
+        and logged so the document is still built with the existing sections and
+        the Run never fails. The sections list is mutated in place.
+
+        Args:
+            sections: The accumulated content section payloads (mutated in place).
+            run_state: The owning Run state (used for decision logging).
+        """
+
+        try:
+            if not sections:
+                return
+
+            # Locate any existing "Executive Summary" section for dedupe/replace.
+            existing_index: int | None = None
+            for index, section in enumerate(sections):
+                heading = str(section.get("heading", "") or "").strip().lower()
+                if heading == _EXECUTIVE_SUMMARY_TITLE.lower():
+                    existing_index = index
+                    break
+
+            context = self._assemble_summary_context(sections, existing_index)
+            if not context.strip():
+                return
+
+            result = await self._tools.dispatch(
+                _TOOL_DRAFT_SECTION,
+                title=_EXECUTIVE_SUMMARY_TITLE,
+                context=context,
+            )
+            summary_body = (result.output if result is not None else "") or ""
+            if not summary_body.strip():
+                return
+
+            if existing_index is not None:
+                sections.pop(existing_index)
+            sections.insert(
+                0, {"heading": _EXECUTIVE_SUMMARY_TITLE, "body": summary_body}
+            )
+            self._safe_log(
+                run_state.run_id,
+                "synthesized executive summary from drafted content",
+                section_count=len(sections),
+            )
+        except Exception as exc:  # noqa: BLE001 - synthesis must never fail a Run
+            self._safe_log(
+                run_state.run_id,
+                "best-effort executive summary synthesis failed and was suppressed",
+                level="WARNING",
+                error=str(exc),
+            )
+
+    @staticmethod
+    def _assemble_summary_context(
+        sections: list[dict[str, Any]], skip_index: int | None = None
+    ) -> str:
+        """Concatenate section headings and bodies into a bounded context string.
+
+        Args:
+            sections: The accumulated content section payloads.
+            skip_index: An optional index to skip (an existing "Executive
+                Summary" section) so the synthesis draws only on real content.
+
+        Returns:
+            The concatenated ``heading`` + ``body`` blocks of the sections,
+            truncated to :data:`_SUMMARY_CONTEXT_MAX_CHARS` characters.
+        """
+
+        parts: list[str] = []
+        for index, section in enumerate(sections):
+            if index == skip_index:
+                continue
+            heading = str(section.get("heading", "") or "").strip()
+            body = str(section.get("body", "") or "").strip()
+            block = "\n".join(piece for piece in (heading, body) if piece)
+            if block:
+                parts.append(block)
+        return "\n\n".join(parts)[:_SUMMARY_CONTEXT_MAX_CHARS]
 
     async def _invoke_with_retry(
         self,
@@ -507,10 +877,12 @@ class Executor:
     ) -> None:
         """Append a section payload derived from a content step's result.
 
-        The section heading is taken from the tool result's ``title`` (when
-        provided) or the step's task/description; the body is the tool's textual
-        output; and a table is included when the result carries ``headers`` and
-        ``rows`` (as ``generate_table_data`` produces).
+        The section heading is resolved by :func:`section_heading_for_step`: the
+        planner-provided ``section_title`` when present, otherwise a
+        human-readable, title-cased title derived from the step (never a raw tool
+        identifier). The body is the tool's textual output, and a table is
+        included when the result carries ``headers`` and ``rows`` (as
+        ``generate_table_data`` produces).
 
         Args:
             step: The content step that produced ``result``.
@@ -519,11 +891,7 @@ class Executor:
         """
 
         data = result.data or {}
-        heading = ""
-        if isinstance(data, dict):
-            heading = str(data.get("title") or "")
-        if not heading:
-            heading = (step.task or step.description or f"Step {step.step}").strip()
+        heading = section_heading_for_step(step, step.step)
 
         section: dict[str, Any] = {"heading": heading}
         if result.output:

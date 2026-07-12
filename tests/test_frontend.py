@@ -166,3 +166,101 @@ def test_styles_support_reduced_motion(styles_css: str) -> None:
     """A prefers-reduced-motion media query disables animation (Req 11.8)."""
 
     assert "prefers-reduced-motion" in styles_css.lower()
+
+
+
+# ---------------------------------------------------------------------------
+# Enhanced HUD markup (live status pill, run stats, toasts, controls)
+# ---------------------------------------------------------------------------
+
+
+def test_index_has_backend_status_pill(index_html: str) -> None:
+    """A live backend status pill is present in the HUD banner."""
+
+    assert 'id="backend-status"' in index_html, "expected a backend-status pill"
+
+
+def test_index_has_run_stats_hud(index_html: str) -> None:
+    """A run-stats strip exists and is hidden until a run starts."""
+
+    match = re.search(r"<div[^>]*id=\"run-stats\"[^>]*>", index_html)
+    assert match, "expected a run-stats container"
+    assert "hidden" in match.group(0), "run-stats must be hidden until submit"
+
+
+def test_index_has_progress_bar(index_html: str) -> None:
+    """A progress bar element reflecting completed steps exists."""
+
+    assert 'id="progress-fill"' in index_html, "expected a progress-fill element"
+    assert 'role="progressbar"' in index_html, "expected a progressbar role"
+
+
+def test_index_has_char_counter(index_html: str) -> None:
+    """A live character counter is present near the input."""
+
+    assert 'id="char-counter"' in index_html, "expected a character counter"
+
+
+def test_index_has_toast_container(index_html: str) -> None:
+    """A toast container exists for transient notifications."""
+
+    assert 'id="toast-container"' in index_html, "expected a toast-container"
+
+
+def test_index_has_new_run_reset_control(index_html: str) -> None:
+    """A New run / reset control exists to return to the idle state."""
+
+    assert 'id="new-run-button"' in index_html, "expected a New run reset control"
+    assert "New run" in index_html, "expected a visible 'New run' label"
+
+
+def test_index_has_open_in_new_tab_link(index_html: str) -> None:
+    """An 'Open in new tab' link (target=_blank) accompanies the download."""
+
+    match = re.search(r"<a[^>]*id=\"open-tab-button\"[^>]*>", index_html)
+    assert match, "expected an open-in-new-tab link"
+    assert 'target="_blank"' in match.group(0), "open-tab link must open a new tab"
+
+
+def test_index_preserves_core_hooks(index_html: str) -> None:
+    """All element ids app.js relies on remain present in the markup."""
+
+    for hook in (
+        'id="request-form"',
+        'id="request-input"',
+        'id="submit-button"',
+        'id="example-chips"',
+        'id="error-banner"',
+        'id="timeline"',
+        'id="timeline-list"',
+        'id="assumptions-panel"',
+        'id="assumptions-list"',
+        'id="reasoning-log"',
+        'id="reasoning-output"',
+        'id="result-card"',
+        'id="result-status"',
+        'id="result-summary"',
+        'id="result-steps"',
+        'id="download-button"',
+    ):
+        assert hook in index_html, f"missing required hook {hook}"
+
+
+def test_styles_progress_fill_is_solid_amber(styles_css: str) -> None:
+    """The progress fill uses the solid amber accent, never a gradient."""
+
+    assert ".progress-fill" in styles_css, "expected a progress-fill rule"
+    # Re-affirm the global no-gradient invariant after the enhancements.
+    assert "gradient(" not in styles_css.lower(), "no gradient fills allowed"
+
+
+def test_styles_reaffirm_tokens_after_enhancements(styles_css: str) -> None:
+    """Design tokens hold after the HUD enhancements (amber/no-purple/mono)."""
+
+    lowered = styles_css.lower()
+    assert _ACCENT_HEX.lower() in lowered, "amber accent must remain present"
+    assert "purple" not in lowered, "the keyword 'purple' must not appear"
+    assert "monospace" in lowered, "monospace must remain present"
+    assert "prefers-reduced-motion" in lowered, "reduced-motion query must remain"
+    for hex_value in _FORBIDDEN_PURPLE_HEXES:
+        assert hex_value.lower() not in lowered, f"forbidden purple hex {hex_value}"

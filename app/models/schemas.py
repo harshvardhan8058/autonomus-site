@@ -131,9 +131,16 @@ class PlanStep(BaseModel):
 
     Attributes:
         step: 1-based sequential step number (``>= 1``).
-        task: Short task name for the step.
+        task: Short task name for the step; the internal action/tool intent that
+            the executor routes on (for example ``research`` or ``draft_section``).
         description: Human-readable description of what the step does.
         expected_output: Description of the step's expected output.
+        section_title: Optional, concise, professional, title-case document
+            section heading (2-6 words) that appears as the heading of this
+            step's section in the rendered Word document. It is distinct from
+            :attr:`task` (the internal action/tool intent): when provided it is
+            used verbatim as the section heading, and it may be empty for
+            assembly steps (for example ``build_docx``) that produce no heading.
         status: Lifecycle status; defaults to :attr:`StepStatus.PENDING`.
         output_summary: Summary of the step's produced output once completed.
         error: Error message recorded when the step fails.
@@ -144,6 +151,14 @@ class PlanStep(BaseModel):
     task: str
     description: str
     expected_output: str
+    section_title: str = Field(
+        default="",
+        description=(
+            "Concise, professional, title-case document-section heading rendered "
+            "in the .docx; distinct from the internal 'task' intent and may be "
+            "empty for assembly steps"
+        ),
+    )
     status: StepStatus = StepStatus.PENDING
     output_summary: str | None = None
     error: str | None = None

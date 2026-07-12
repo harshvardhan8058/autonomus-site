@@ -79,8 +79,11 @@ _KEEPALIVE_SECONDS = 15.0
 
 # The explanatory message returned when the guardrail rejects a request (Req 1.4).
 _REJECTION_MESSAGE = (
-    "This request was rejected. The service only produces Microsoft Word (.docx) "
-    "business document deliverables; please submit a request for a document."
+    "This request doesn't look like a request for a document. I generate written "
+    "deliverables — reports, briefs, summaries, proposals, plans, analyses, and "
+    "similar — as polished Word (.docx) files, on essentially any topic. Try "
+    "asking for one, e.g. 'Create a brief on the history of US–Iran relations' or "
+    "'Write a project proposal for a new mobile app.'"
 )
 
 
