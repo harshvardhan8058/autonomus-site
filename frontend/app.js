@@ -781,7 +781,17 @@
     // appendEventLog (log-only). Robust to malformed payloads.
     const onEvent = function (evt) {
       try {
-        appendEventLog(JSON.parse(evt.data));
+        const data = JSON.parse(evt.data);
+        appendEventLog(data);
+        // The stream is only ever opened AFTER the run has completed, so the
+        // terminal `run_completed` event is our cue to stop: close the stream
+        // and null it out so EventSource does not auto-reconnect forever.
+        if (data && data.type === "run_completed") {
+          if (eventSource) {
+            eventSource.close();
+            eventSource = null;
+          }
+        }
       } catch (err) {
         log("Failed to parse event: " + err, "failed");
       }
@@ -795,10 +805,17 @@
     // Fallback for any unnamed/`message` frames.
     eventSource.onmessage = onEvent;
 
-    // No-op: the timeline/result are already rendered from the POST response,
-    // so a stream error (including the expected close after the terminal
-    // event) requires no fallback.
-    eventSource.onerror = function () {};
+    // Close-and-stop (never auto-reconnect). The stream is only ever opened
+    // AFTER the run has completed and the timeline/result are already rendered
+    // from the POST response, so a stream error (including the expected close
+    // after the terminal event) requires no fallback. Closing here prevents
+    // EventSource's infinite auto-reconnect loop for an already-completed run.
+    eventSource.onerror = function () {
+      if (eventSource) {
+        eventSource.close();
+        eventSource = null;
+      }
+    };
   }
 
   // ----- Submit flow ------------------------------------------------------
