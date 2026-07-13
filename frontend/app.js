@@ -661,17 +661,42 @@
     setFormDisabled(false);
   }
 
+  // The server (app/api/agent.py `_format_sse`) emits NAMED SSE frames — each
+  // carries an `event: <type>` line — so the browser's EventSource dispatches
+  // them to per-name listeners, NOT to `onmessage`. We register a listener for
+  // each of the seven event types below, and keep `onmessage` as a fallback for
+  // any unnamed/`message` frames.
+  const SSE_EVENT_TYPES = [
+    "planning_started",
+    "plan_created",
+    "step_started",
+    "step_completed",
+    "step_failed",
+    "reflection",
+    "run_completed",
+  ];
+
   /** Open the SSE stream for a run and wire up event handling. */
   function openStream(runId, fallbackResponse) {
     eventSource = new EventSource("/agent/" + encodeURIComponent(runId) + "/stream");
 
-    eventSource.onmessage = function (evt) {
+    // Shared dispatch: parse the frame's JSON payload and route it through
+    // handleEvent. Robust to malformed payloads (logs a failed-parse line).
+    const onEvent = function (evt) {
       try {
         handleEvent(JSON.parse(evt.data));
       } catch (err) {
         log("Failed to parse event: " + err, "failed");
       }
     };
+
+    // Named events (the server always names its frames).
+    SSE_EVENT_TYPES.forEach(function (name) {
+      eventSource.addEventListener(name, onEvent);
+    });
+
+    // Fallback for any unnamed/`message` frames.
+    eventSource.onmessage = onEvent;
 
     eventSource.onerror = function () {
       // The stream closes after the terminal event; if the run already
