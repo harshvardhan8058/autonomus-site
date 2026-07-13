@@ -127,3 +127,48 @@ async def test_make_plan_escalates_to_planning_error_when_all_backends_fail() ->
     assert error.reason
     assert len(error.retry_history) >= 1
     assert error.retry_history[0].error
+
+
+
+async def test_make_plan_offline_fallback_returns_default_plan() -> None:
+    """With offline fallback enabled, a total backend failure yields a default plan.
+
+    When every backend fails but ``enable_offline_fallback=True``,
+    :meth:`Planner.make_plan` returns the deterministic offline plan instead of
+    raising :class:`PlanningError`.
+    """
+
+    settings = Settings(GROQ_API_KEY="test-key")
+    llm = LLMService(
+        settings,
+        groq_backend=FakeLLMBackend("groq", always_fail=True),
+        ollama_backend=FakeLLMBackend("ollama", always_fail=True),
+        sleep=_noop_sleep,
+    )
+    planner = Planner(llm, enable_offline_fallback=True)
+
+    plan = await planner.make_plan(
+        "Create a proposal for migrating our CRM to the cloud.", run_id="run-offline"
+    )
+
+    assert isinstance(plan, Plan)
+    assert len(plan.steps) >= 2
+    # The offline plan records its degraded-mode origin in the assumptions.
+    assert plan.assumptions
+    assert any("no live llm backend" in a.lower() for a in plan.assumptions)
+
+
+async def test_make_plan_without_offline_fallback_still_raises() -> None:
+    """With offline fallback disabled (default), a total failure still raises."""
+
+    settings = Settings(GROQ_API_KEY="test-key")
+    llm = LLMService(
+        settings,
+        groq_backend=FakeLLMBackend("groq", always_fail=True),
+        ollama_backend=FakeLLMBackend("ollama", always_fail=True),
+        sleep=_noop_sleep,
+    )
+    planner = Planner(llm, enable_offline_fallback=False)
+
+    with pytest.raises(PlanningError):
+        await planner.make_plan("Draft a proposal.", run_id="run-fail")

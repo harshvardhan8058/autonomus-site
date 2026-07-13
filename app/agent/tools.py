@@ -35,6 +35,11 @@ from typing import Any, Protocol, runtime_checkable
 from pydantic import BaseModel, Field
 
 from app.services.llm import LLMService
+from app.services.offline_content import (
+    offline_research,
+    offline_section,
+    offline_table,
+)
 
 # The default document title and prepared-by line used when a caller does not
 # supply overrides to the ``build_docx`` tool.
@@ -242,11 +247,16 @@ def _summarize(text: str, *, fallback: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def make_research_tool(llm: LLMService) -> ToolFn:
+def make_research_tool(
+    llm: LLMService, *, enable_offline_fallback: bool = False
+) -> ToolFn:
     """Create the ``research`` tool bound to ``llm`` (Req 3.2).
 
     Args:
         llm: The shared LLM service used to gather researched facts.
+        enable_offline_fallback: When ``True``, a deterministic offline briefing
+            is produced if every LLM backend is unreachable, so research never
+            fails outright.
 
     Returns:
         An async :data:`ToolFn` that researches a topic and returns a
@@ -273,7 +283,10 @@ def make_research_tool(llm: LLMService) -> ToolFn:
         """
 
         prompt = f"Research the following topic for a business document:\n\n{topic}"
-        output = await llm.complete(prompt, system=system)
+        fallback = (
+            (lambda: offline_research(topic)) if enable_offline_fallback else None
+        )
+        output = await llm.complete(prompt, system=system, offline_fallback=fallback)
         return ToolResult(
             output=output,
             summary=_summarize(output, fallback=f"Researched: {topic}"),
@@ -282,11 +295,16 @@ def make_research_tool(llm: LLMService) -> ToolFn:
     return research
 
 
-def make_draft_section_tool(llm: LLMService) -> ToolFn:
+def make_draft_section_tool(
+    llm: LLMService, *, enable_offline_fallback: bool = False
+) -> ToolFn:
     """Create the ``draft_section`` tool bound to ``llm`` (Req 3.2).
 
     Args:
         llm: The shared LLM service used to draft section prose.
+        enable_offline_fallback: When ``True``, deterministic offline prose is
+            produced if every LLM backend is unreachable, so drafting never fails
+            outright.
 
     Returns:
         An async :data:`ToolFn` that drafts a titled section from context and
@@ -317,7 +335,12 @@ def make_draft_section_tool(llm: LLMService) -> ToolFn:
             f"Context to draw from:\n{context}\n\n"
             "Write the section body."
         )
-        output = await llm.complete(prompt, system=system)
+        fallback = (
+            (lambda: offline_section(title, context))
+            if enable_offline_fallback
+            else None
+        )
+        output = await llm.complete(prompt, system=system, offline_fallback=fallback)
         return ToolResult(
             output=output,
             data={"title": title},
@@ -327,11 +350,16 @@ def make_draft_section_tool(llm: LLMService) -> ToolFn:
     return draft_section
 
 
-def make_generate_table_data_tool(llm: LLMService) -> ToolFn:
+def make_generate_table_data_tool(
+    llm: LLMService, *, enable_offline_fallback: bool = False
+) -> ToolFn:
     """Create the ``generate_table_data`` tool bound to ``llm`` (Req 3.2).
 
     Args:
         llm: The shared LLM service used to produce structured tabular data.
+        enable_offline_fallback: When ``True``, a deterministic offline table is
+            produced if every LLM backend is unreachable, so table generation
+            never fails outright.
 
     Returns:
         An async :data:`ToolFn` that produces table headers and rows and returns
@@ -357,7 +385,15 @@ def make_generate_table_data_tool(llm: LLMService) -> ToolFn:
         """
 
         prompt = f"Generate table data for the following specification:\n\n{spec}"
-        table = await llm.complete_json(prompt, _TableData, system=system)
+
+        def _offline_table() -> _TableData:
+            headers, rows = offline_table(spec)
+            return _TableData(headers=headers, rows=rows)
+
+        fallback = _offline_table if enable_offline_fallback else None
+        table = await llm.complete_json(
+            prompt, _TableData, system=system, offline_fallback=fallback
+        )
         data: dict[str, Any] = {"headers": table.headers, "rows": table.rows}
         summary = (
             f"Generated a {len(table.rows)}x{len(table.headers)} table"
@@ -425,7 +461,10 @@ def make_build_docx_tool(doc_builder: DocumentBuilderProtocol) -> ToolFn:
 
 
 def build_default_registry(
-    llm: LLMService, doc_builder: DocumentBuilderProtocol
+    llm: LLMService,
+    doc_builder: DocumentBuilderProtocol,
+    *,
+    enable_offline_fallback: bool = False,
 ) -> ToolRegistry:
     """Build a :class:`ToolRegistry` with all four standard tools registered.
 
@@ -435,14 +474,28 @@ def build_default_registry(
     Args:
         llm: The shared LLM service the content tools call.
         doc_builder: The document builder the ``build_docx`` tool delegates to.
+        enable_offline_fallback: When ``True``, the three content tools generate
+            deterministic offline content if every LLM backend is unreachable, so
+            a deliverable is always produced (graceful degradation).
 
     Returns:
         A ready-to-use :class:`ToolRegistry`.
     """
 
     registry = ToolRegistry()
-    registry.register("research", make_research_tool(llm))
-    registry.register("draft_section", make_draft_section_tool(llm))
-    registry.register("generate_table_data", make_generate_table_data_tool(llm))
+    registry.register(
+        "research",
+        make_research_tool(llm, enable_offline_fallback=enable_offline_fallback),
+    )
+    registry.register(
+        "draft_section",
+        make_draft_section_tool(llm, enable_offline_fallback=enable_offline_fallback),
+    )
+    registry.register(
+        "generate_table_data",
+        make_generate_table_data_tool(
+            llm, enable_offline_fallback=enable_offline_fallback
+        ),
+    )
     registry.register("build_docx", make_build_docx_tool(doc_builder))
     return registry

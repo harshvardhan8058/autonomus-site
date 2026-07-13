@@ -322,6 +322,53 @@ async def test_run_does_not_crash_when_logger_decision_raises() -> None:
     assert all(step.status is StepStatus.DONE for step in plan.steps)
 
 
+# ---------------------------------------------------------------------------
+# _build_kwargs section-heading resolution (Req 10.1)
+# ---------------------------------------------------------------------------
+
+
+def _draft_kwargs_for(step: PlanStep) -> dict[str, Any]:
+    """Build the draft_section kwargs the executor would dispatch for ``step``."""
+
+    executor = Executor(_success_registry(), EventBus())
+    state = _new_run_state("run-kwargs", Plan(steps=[step, step]))
+    return executor._build_kwargs("draft_section", step, state, [])
+
+
+def test_build_kwargs_uses_planner_section_title_for_draft_section() -> None:
+    """draft_section is titled with the planner section_title, not the tool name."""
+
+    step = PlanStep(
+        step=1,
+        task="draft_section",
+        section_title="Recommendations",
+        description="Draft a recommendations section for the CRM migration.",
+        expected_output="A section with actionable recommendations.",
+    )
+
+    kwargs = _draft_kwargs_for(step)
+
+    assert kwargs["title"] == "Recommendations"
+    assert kwargs["title"] != "draft_section"
+
+
+def test_build_kwargs_humanizes_title_when_section_title_empty() -> None:
+    """With no section_title, the title is humanized and never the tool name."""
+
+    step = PlanStep(
+        step=1,
+        task="draft_section",
+        section_title="",
+        description="Draft an overview of the proposed cloud architecture.",
+        expected_output="An overview section.",
+    )
+
+    kwargs = _draft_kwargs_for(step)
+
+    assert kwargs["title"] != "draft_section"
+    assert kwargs["title"].strip()
+
+
 async def test_failed_step_still_terminalizes_under_broken_bookkeeping() -> None:
     """Even with broken bookkeeping, a failing tool yields a FAILED status (Req 3.5)."""
 

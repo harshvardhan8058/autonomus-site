@@ -597,9 +597,11 @@ class Executor:
                 "title": self._derive_title(run_state),
                 "prepared_by": _DEFAULT_PREPARED_BY,
             }
-        # draft_section (and default fallback).
+        # draft_section (and default fallback). Resolve the proper section
+        # heading (planner-provided title, else a humanized one) rather than
+        # passing the raw tool identifier as the title.
         return {
-            "title": task or "Section",
+            "title": section_heading_for_step(step, step.step),
             "context": description or task or run_state.request,
         }
 

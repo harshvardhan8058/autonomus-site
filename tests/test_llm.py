@@ -26,7 +26,12 @@ from hypothesis import strategies as st
 from pydantic import BaseModel
 
 from app.core.config import Settings
-from app.services.llm import LLMError, LLMJSONError, LLMService
+from app.services.llm import (
+    LLMError,
+    LLMJSONError,
+    LLMService,
+    _is_connection_error,
+)
 from tests.conftest import FakeLLMBackend
 
 # ---------------------------------------------------------------------------
@@ -38,6 +43,29 @@ async def _noop_sleep(_delay: float) -> None:
     """A no-op async sleep so backoff introduces no real delay."""
 
     return None
+
+
+class _FakeClock:
+    """A manually-advanced monotonic clock for driving the circuit breaker."""
+
+    def __init__(self, start: float = 0.0) -> None:
+        self.now = start
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, delta: float) -> None:
+        self.now += delta
+
+
+class APIConnectionError(RuntimeError):
+    """Synthetic connection-style error identified purely by its class name."""
+
+
+def _connection_exc() -> Exception:
+    """Return a connection-style exception (recognized by its class name)."""
+
+    return APIConnectionError("boom")
 
 
 class _Target(BaseModel):
@@ -359,3 +387,272 @@ def test_repair_json_strips_fences_and_trailing_commas() -> None:
     assert re.match(r"^\{.*\}$", repaired, re.DOTALL)
     assert ",}" not in repaired
     assert "```" not in repaired
+
+
+
+# ---------------------------------------------------------------------------
+# Offline fallback (deterministic degradation when all backends fail)
+# ---------------------------------------------------------------------------
+
+
+async def test_complete_returns_offline_fallback_when_all_backends_fail() -> None:
+    """``complete`` returns the fallback value (no raise) when every backend fails."""
+
+    settings_ = Settings(GROQ_API_KEY="test-key")
+    groq = FakeLLMBackend("groq", always_fail=True)
+    ollama = FakeLLMBackend("ollama", always_fail=True)
+    svc = LLMService(
+        settings_, groq_backend=groq, ollama_backend=ollama, sleep=_noop_sleep
+    )
+
+    result = await svc.complete("prompt", offline_fallback=lambda: "OFFLINE")
+
+    assert result == "OFFLINE"
+
+
+async def test_complete_json_returns_offline_fallback_when_all_backends_fail() -> None:
+    """``complete_json`` returns the fallback instance when every backend fails."""
+
+    settings_ = Settings(GROQ_API_KEY="test-key")
+    groq = FakeLLMBackend("groq", always_fail=True)
+    ollama = FakeLLMBackend("ollama", always_fail=True)
+    svc = LLMService(
+        settings_, groq_backend=groq, ollama_backend=ollama, sleep=_noop_sleep
+    )
+    sentinel = _Target(name="offline", value=0, tags=[])
+
+    result = await svc.complete_json("prompt", _Target, offline_fallback=lambda: sentinel)
+
+    assert result is sentinel
+
+
+async def test_offline_fallback_not_called_when_backend_succeeds() -> None:
+    """A successful backend never invokes the offline fallback."""
+
+    settings_ = Settings(GROQ_API_KEY="test-key")
+    groq = FakeLLMBackend("groq", response="LIVE")
+    ollama = FakeLLMBackend("ollama")
+    svc = LLMService(
+        settings_, groq_backend=groq, ollama_backend=ollama, sleep=_noop_sleep
+    )
+
+    called = False
+
+    def _fallback() -> str:
+        nonlocal called
+        called = True
+        return "OFFLINE"
+
+    result = await svc.complete("prompt", offline_fallback=_fallback)
+
+    assert result == "LIVE"
+    assert called is False
+
+
+async def test_complete_still_raises_without_offline_fallback() -> None:
+    """Without a fallback, total backend failure still raises ``LLMError``."""
+
+    settings_ = Settings(GROQ_API_KEY="test-key")
+    groq = FakeLLMBackend("groq", always_fail=True)
+    ollama = FakeLLMBackend("ollama", always_fail=True)
+    svc = LLMService(
+        settings_, groq_backend=groq, ollama_backend=ollama, sleep=_noop_sleep
+    )
+
+    with pytest.raises(LLMError):
+        await svc.complete("prompt")
+
+
+async def test_complete_json_still_raises_without_offline_fallback() -> None:
+    """Without a fallback, total backend failure still raises ``LLMJSONError``."""
+
+    settings_ = Settings(GROQ_API_KEY="test-key")
+    groq = FakeLLMBackend("groq", always_fail=True)
+    ollama = FakeLLMBackend("ollama", always_fail=True)
+    svc = LLMService(
+        settings_, groq_backend=groq, ollama_backend=ollama, sleep=_noop_sleep
+    )
+
+    with pytest.raises(LLMJSONError):
+        await svc.complete_json("prompt", _Target)
+
+
+async def test_offline_fallback_error_does_not_mask_backend_failure() -> None:
+    """When the fallback itself raises, the original LLM error is surfaced."""
+
+    settings_ = Settings(GROQ_API_KEY="test-key")
+    groq = FakeLLMBackend("groq", always_fail=True)
+    ollama = FakeLLMBackend("ollama", always_fail=True)
+    svc = LLMService(
+        settings_, groq_backend=groq, ollama_backend=ollama, sleep=_noop_sleep
+    )
+
+    def _broken_fallback() -> str:
+        raise ValueError("fallback bug")
+
+    with pytest.raises(LLMError):
+        await svc.complete("prompt", offline_fallback=_broken_fallback)
+
+
+
+# ---------------------------------------------------------------------------
+# Connection-error detection + fast-fail (no retries on connection errors)
+# ---------------------------------------------------------------------------
+
+
+def test_is_connection_error_true_by_class_name() -> None:
+    """An exception whose class name signals a connection failure is detected."""
+
+    assert _is_connection_error(APIConnectionError("unreachable")) is True
+
+
+def test_is_connection_error_true_by_message() -> None:
+    """A generic exception with a connection-style message is detected."""
+
+    assert _is_connection_error(RuntimeError("All connection attempts failed")) is True
+
+
+def test_is_connection_error_true_via_cause_chain() -> None:
+    """A connection failure nested in the cause chain is still detected."""
+
+    inner = APIConnectionError("connect")
+    outer = RuntimeError("wrapper")
+    outer.__cause__ = inner
+    assert _is_connection_error(outer) is True
+
+
+def test_is_connection_error_false_for_plain_value_error() -> None:
+    """A non-connection error (e.g. bad JSON) is not treated as a connection error."""
+
+    assert _is_connection_error(ValueError("bad json")) is False
+
+
+async def test_connection_errors_are_not_retried() -> None:
+    """A connection error fails a backend after exactly one attempt (no retries)."""
+
+    settings_ = Settings(GROQ_API_KEY="test-key")
+    groq = FakeLLMBackend("groq", always_fail=True, exc_factory=_connection_exc)
+    ollama = FakeLLMBackend("ollama", always_fail=True, exc_factory=_connection_exc)
+    svc = LLMService(
+        settings_, groq_backend=groq, ollama_backend=ollama, sleep=_noop_sleep
+    )
+
+    with pytest.raises(LLMError):
+        await svc.complete("prompt")
+
+    # Each backend in the chain is attempted exactly once (not LLM_MAX_RETRIES).
+    assert groq.call_count == 1
+    assert ollama.call_count == 1
+
+
+async def test_non_connection_errors_are_still_retried() -> None:
+    """A non-connection error preserves the bounded retry behavior per backend."""
+
+    settings_ = Settings(GROQ_API_KEY="test-key")
+    max_retries = settings_.LLM_MAX_RETRIES
+    groq = FakeLLMBackend("groq", always_fail=True)  # default RuntimeError
+    ollama = FakeLLMBackend("ollama", always_fail=True)
+    svc = LLMService(
+        settings_, groq_backend=groq, ollama_backend=ollama, sleep=_noop_sleep
+    )
+
+    with pytest.raises(LLMError):
+        await svc.complete("prompt")
+
+    assert groq.call_count == max_retries
+    assert ollama.call_count == max_retries
+
+
+# ---------------------------------------------------------------------------
+# Circuit breaker (skip the network for the cooldown window after a failure)
+# ---------------------------------------------------------------------------
+
+
+async def test_breaker_short_circuits_within_cooldown() -> None:
+    """After a failure trips the breaker, a fallback call skips the backend."""
+
+    clock = _FakeClock(start=100.0)
+    settings_ = Settings(GROQ_API_KEY="test-key")  # cooldown defaults to 30s
+    groq = FakeLLMBackend("groq", always_fail=True, exc_factory=_connection_exc)
+    ollama = FakeLLMBackend("ollama", always_fail=True, exc_factory=_connection_exc)
+    svc = LLMService(
+        settings_,
+        groq_backend=groq,
+        ollama_backend=ollama,
+        sleep=_noop_sleep,
+        clock=clock,
+    )
+
+    # First call fails and trips the breaker (each backend attempted once).
+    first = await svc.complete("prompt", offline_fallback=lambda: "OFFLINE")
+    assert first == "OFFLINE"
+    groq_calls_after_first = groq.call_count
+    ollama_calls_after_first = ollama.call_count
+    assert groq_calls_after_first == 1
+    assert ollama_calls_after_first == 1
+
+    # Second call within the cooldown returns the fallback WITHOUT touching the
+    # network (call counts do not increase).
+    clock.advance(5.0)  # still < 30s cooldown
+    second = await svc.complete("prompt", offline_fallback=lambda: "OFFLINE")
+    assert second == "OFFLINE"
+    assert groq.call_count == groq_calls_after_first
+    assert ollama.call_count == ollama_calls_after_first
+
+    # After the cooldown elapses, the backend is attempted again.
+    clock.advance(30.0)  # now beyond the 30s cooldown
+    third = await svc.complete("prompt", offline_fallback=lambda: "OFFLINE")
+    assert third == "OFFLINE"
+    assert groq.call_count > groq_calls_after_first
+
+
+async def test_breaker_does_not_short_circuit_without_fallback() -> None:
+    """With no offline fallback the breaker never short-circuits (raises as today)."""
+
+    clock = _FakeClock(start=0.0)
+    settings_ = Settings(GROQ_API_KEY="test-key")
+    groq = FakeLLMBackend("groq", always_fail=True, exc_factory=_connection_exc)
+    ollama = FakeLLMBackend("ollama", always_fail=True, exc_factory=_connection_exc)
+    svc = LLMService(
+        settings_,
+        groq_backend=groq,
+        ollama_backend=ollama,
+        sleep=_noop_sleep,
+        clock=clock,
+    )
+
+    with pytest.raises(LLMError):
+        await svc.complete("prompt")  # trips the breaker
+    with pytest.raises(LLMError):
+        await svc.complete("prompt")  # no fallback -> still attempts + raises
+
+    # The network was attempted on both calls (breaker did not suppress it).
+    assert groq.call_count == 2
+
+
+async def test_breaker_resets_on_success() -> None:
+    """A successful call closes the breaker so later calls attempt the network."""
+
+    clock = _FakeClock(start=0.0)
+    settings_ = Settings(GROQ_API_KEY="test-key")
+    groq = FakeLLMBackend("groq", response="LIVE")
+    ollama = FakeLLMBackend("ollama")
+    svc = LLMService(
+        settings_,
+        groq_backend=groq,
+        ollama_backend=ollama,
+        sleep=_noop_sleep,
+        clock=clock,
+    )
+
+    # Manually open the breaker. A call WITHOUT a fallback does not short-circuit
+    # (short-circuit only applies when a fallback is provided), so it reaches the
+    # network, succeeds, and resets the breaker.
+    svc._breaker_trip()
+    assert svc._breaker_is_open() is True
+
+    result = await svc.complete("prompt")
+
+    assert result == "LIVE"
+    assert svc._breaker_is_open() is False
+    assert groq.call_count == 1

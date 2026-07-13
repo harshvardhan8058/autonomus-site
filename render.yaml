@@ -1,0 +1,26 @@
+# Render.com Blueprint for the Autonomous Agent Service.
+# Deploy: Render Dashboard -> New -> Blueprint -> connect this repo -> Apply.
+# Then set the GROQ_API_KEY value in the dashboard (it is intentionally not committed).
+services:
+  - type: web
+    name: autonomous-agent-service
+    runtime: python
+    plan: free
+    branch: feat/autonomous-agent-service
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "uvicorn app.main:app --host 0.0.0.0 --port $PORT"
+    healthCheckPath: /health
+    envVars:
+      # Pin the Python runtime to match the project (requires-python >=3.11).
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+      # Groq API key — set this SECRET in the Render dashboard; never commit it.
+      - key: GROQ_API_KEY
+        sync: false
+      # Primary Groq model (confirmed available on the free tier).
+      - key: GROQ_MODEL
+        value: "llama-3.3-70b-versatile"
+      # Groq-only mode: no offline templated fallback (returns a clear 503 if the
+      # LLM is ever unreachable). Set to "true" to re-enable the offline safety net.
+      - key: LLM_OFFLINE_FALLBACK
+        value: "false"

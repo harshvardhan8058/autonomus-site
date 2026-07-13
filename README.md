@@ -464,6 +464,27 @@ unconditionally with a safe placeholder and a purpose comment.
 
 ---
 
+## Deploy to Render
+
+The repo ships with a [`render.yaml`](render.yaml) Blueprint, so deploying to
+[Render](https://render.com) takes only a few clicks:
+
+1. **Fork or connect** this repository to your Render account.
+2. In the Render Dashboard choose **New → Blueprint**, select the repo, and click
+   **Apply** — Render reads `render.yaml` and provisions the web service.
+3. Once the service exists, open its **Environment** tab and set `GROQ_API_KEY` to
+   a valid Groq key (it is intentionally **not** committed — never commit secrets).
+   Optionally set `LLM_OFFLINE_FALLBACK=true` to re-enable the offline safety net.
+
+A few things to keep in mind on the free tier:
+
+- The service **spins down after ~15 minutes of inactivity**, so the first request
+  after an idle period incurs a cold start (~30–60s).
+- Generated `.docx` files are written to the instance's **ephemeral disk** — fine
+  for immediate download, but not persisted across restarts or redeploys.
+
+---
+
 ## Zero Paid Keys
 
 This service is built to run with **no paid API keys**. Leave `GROQ_API_KEY` blank
