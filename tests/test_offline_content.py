@@ -131,6 +131,44 @@ def test_offline_section_returns_non_empty_prose(title: str, context: str) -> No
     assert body.strip()
 
 
+def test_offline_section_distinct_output_per_heading() -> None:
+    """Different headings yield distinct, heading-relevant framing (not boilerplate)."""
+
+    overview = offline_section("Overview", "Introduce the CRM migration.")
+    recommendations = offline_section(
+        "Recommendations", "Recommend a migration approach for the CRM."
+    )
+    considerations = offline_section(
+        "Key Considerations", "Outline risks and trade-offs of the migration."
+    )
+
+    # All three outputs must differ from one another.
+    assert overview != recommendations
+    assert overview != considerations
+    assert recommendations != considerations
+
+    # Each references its own heading and its intent-specific framing.
+    assert "Overview" in overview
+    assert "orients the reader" in overview
+    assert "Recommendations" in recommendations
+    assert "actionable recommendations" in recommendations
+    assert "Key Considerations" in considerations
+    assert "trade-offs and risks" in considerations
+
+
+def test_offline_section_non_empty_for_empty_inputs() -> None:
+    """``offline_section`` stays non-empty even for empty title and context."""
+
+    assert offline_section("", "").strip()
+
+
+def test_offline_section_weaves_context() -> None:
+    """The supplied context text is woven into the section prose."""
+
+    body = offline_section("Overview", "focus on data residency requirements")
+    assert "data residency requirements" in body
+
+
 @settings(max_examples=100, deadline=None)
 @given(topic=st.text(max_size=80))
 def test_offline_research_returns_non_empty_briefing(topic: str) -> None:

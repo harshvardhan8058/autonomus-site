@@ -137,12 +137,44 @@ def default_plan(request: str) -> Plan:
     return Plan(steps=steps, assumptions=assumptions)
 
 
+def _research_subject(topic: str) -> str:
+    """Extract a concise subject from a possibly-imperative ``topic`` string.
+
+    When ``topic`` is a full instruction such as
+    ``"Gather background and key considerations about X."`` the trailing subject
+    after the first ``" about "`` / ``" on "`` / ``" for "`` connector is used so
+    the briefing reads "Briefing on X" rather than echoing the whole instruction.
+    Otherwise the cleaned ``topic`` is returned. Deterministic and safe for
+    arbitrary input.
+
+    Args:
+        topic: The subject or instruction to brief.
+
+    Returns:
+        A non-empty, single-line subject string.
+    """
+
+    text = " ".join((topic or "").split())
+    if not text:
+        return "the subject"
+    lowered = text.lower()
+    for connector in (" about ", " on ", " for "):
+        index = lowered.find(connector)
+        if index != -1:
+            candidate = text[index + len(connector):].strip().rstrip(".;:,")
+            if candidate:
+                return candidate
+    return text.rstrip(".;:,") or "the subject"
+
+
 def offline_research(topic: str) -> str:
     """Return a generic-but-relevant research briefing about ``topic``.
 
     The briefing is qualitative prose with a few bullet points; it deliberately
     avoids inventing precise statistics. It is suitable as the researched-facts
-    context a drafting step draws from.
+    context a drafting step draws from. When ``topic`` is a full imperative
+    instruction, the trailing subject is extracted so the briefing reads
+    naturally rather than echoing the whole instruction.
 
     Args:
         topic: The subject to brief.
@@ -151,7 +183,7 @@ def offline_research(topic: str) -> str:
         A non-empty multi-line briefing string.
     """
 
-    subject = (topic or "the subject").strip() or "the subject"
+    subject = _research_subject(topic)
     return (
         f"Briefing on {subject}:\n"
         f"- {subject} is best approached by first clarifying goals, scope, and "
@@ -167,37 +199,105 @@ def offline_research(topic: str) -> str:
     )
 
 
+# Section framings keyed by intent. Each entry supplies an opening paragraph
+# lead-in and a middle paragraph lead-in, selected by keywords in the heading so
+# different section types read distinctly rather than as identical boilerplate.
+# The tuples are ``(keywords, opening_lead, middle_lead)`` and are checked in
+# order so more specific intents win.
+_SECTION_FRAMINGS: tuple[tuple[tuple[str, ...], str, str], ...] = (
+    (
+        ("overview", "introduction", "summary"),
+        "introduces the deliverable and orients the reader",
+        "sets out the scope, the objectives, and the questions the document sets "
+        "out to answer",
+    ),
+    (
+        ("recommendation", "next step", "action"),
+        "sets out actionable recommendations",
+        "prioritizes the proposed actions, notes the rationale behind each, and "
+        "flags the decisions that warrant sign-off",
+    ),
+    (
+        ("consideration", "risk", "trade-off", "tradeoff", "challenge"),
+        "examines the key trade-offs and risks",
+        "weighs the competing factors, surfaces the dependencies and failure "
+        "modes, and outlines how each risk might be mitigated",
+    ),
+    (
+        ("background", "context", "history"),
+        "establishes the situational background",
+        "traces how the current situation arose, identifies the stakeholders "
+        "involved, and clarifies the constraints already in play",
+    ),
+)
+
+# The neutral framing used when a heading matches none of the specific intents.
+_DEFAULT_FRAMING = (
+    "addresses the topic in the wider context of the deliverable",
+    "frames the relevant objectives, highlights the factors most likely to "
+    "influence the outcome, and keeps the discussion tied to the stated goals",
+)
+
+
+def _section_framing(heading_lower: str) -> tuple[str, str]:
+    """Select an opening/middle framing for a section by its heading keywords.
+
+    Args:
+        heading_lower: The lower-cased section heading.
+
+    Returns:
+        An ``(opening_lead, middle_lead)`` tuple driving the prose framing.
+    """
+
+    for keywords, opening_lead, middle_lead in _SECTION_FRAMINGS:
+        if any(keyword in heading_lower for keyword in keywords):
+            return opening_lead, middle_lead
+    return _DEFAULT_FRAMING
+
+
 def offline_section(title: str, context: str) -> str:
     """Return professional prose for a document section, offline.
 
-    Produces two to three short paragraphs appropriate for a business document,
-    referencing the section ``title`` and drawing on the supplied ``context``. No
-    hard numbers are invented.
+    Produces two to three short paragraphs appropriate for a business document.
+    Both the section ``title`` (as a natural heading reference) and the supplied
+    ``context`` (which carries the section's intent) shape the prose. A
+    section-appropriate framing is selected from keywords in the heading so an
+    overview, a recommendations section, a considerations/risks section, and a
+    background section each read distinctly rather than as identical boilerplate.
+    No hard numbers are invented; the output is deterministic and pure.
 
     Args:
         title: The section heading the prose is written for.
-        context: Supporting context and facts to reference.
+        context: Supporting context and facts to reference; its intent shapes the
+            framing and it is woven into the prose.
 
     Returns:
         A non-empty section body string.
     """
 
     heading = (title or "This section").strip() or "This section"
-    context_clause = (
-        "Drawing on the gathered background, "
-        if (context or "").strip()
-        else "Based on the request, "
-    )
+    heading_lower = heading.lower()
+    opening_lead, middle_lead = _section_framing(heading_lower)
+
+    context_text = " ".join((context or "").split())
+    if context_text:
+        context_sentence = (
+            f" It draws on the accompanying context — {context_text} — to keep the "
+            "discussion grounded in the specifics of the request."
+        )
+    else:
+        context_sentence = (
+            " In the absence of additional detail, it stays at a level general "
+            "enough to remain useful once organization-specific facts are added."
+        )
+
     return (
-        f"{context_clause}this section addresses {heading.lower()} in the wider "
-        "context of the deliverable. It frames the relevant objectives and "
-        "highlights the factors most likely to influence the outcome.\n\n"
-        f"The discussion of {heading.lower()} weighs the practical trade-offs, "
-        "identifies dependencies and risks, and outlines the considerations that "
-        "a reader should keep in mind. The emphasis is on clarity and on "
-        "decisions that can be justified against the stated goals.\n\n"
-        "These points should be reviewed and refined with organization-specific "
-        "detail before the document is finalized."
+        f"The {heading} section {opening_lead}.{context_sentence}\n\n"
+        f"Here the treatment of {heading} {middle_lead}. The emphasis is on "
+        "clarity and on conclusions that can be justified against the stated "
+        "goals rather than on unsupported assertions.\n\n"
+        f"These points on {heading} should be reviewed and refined with "
+        "organization-specific detail before the document is finalized."
     )
 
 
