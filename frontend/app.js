@@ -5,12 +5,19 @@
  *
  * Vanilla JS, no build step. On submit the console POSTs the request to
  * `/agent`; because that endpoint is synchronous and returns the full
- * `AgentResponse` only after the run finishes, the console then opens an
- * `EventSource` on `/agent/{run_id}/stream`, which REPLAYS the run's buffered
- * events. The animated timeline and monospace reasoning log are populated
- * purely from SSE events; the final result card is rendered from the
- * `run_completed` event (falling back to the POST response). The code is robust
- * to the replay case where every event arrives back-to-back immediately.
+ * `AgentResponse` only after the run finishes, that POST response is the
+ * SINGLE SOURCE OF TRUTH for the UI. `renderFromResponse` renders the final
+ * timeline, DONE/FAILED/TOTAL counters, progress bar, assumptions, and result
+ * card directly and authoritatively from the returned `AgentResponse` — it
+ * does not depend on Server-Sent Events for correctness.
+ *
+ * After the authoritative render, the console opens an `EventSource` on
+ * `/agent/{run_id}/stream` in a LOG-ONLY mode: the replayed/streamed events are
+ * used solely to populate the monospace reasoning log via `appendEventLog`.
+ * That log-only stream never mutates the timeline, counters, or result card, so
+ * it can neither zero-out the authoritative state nor double-count steps. If
+ * the stream errors or delivers nothing, the timeline/counters/progress/result
+ * are already fully rendered from the POST response.
  *
  * This controller also drives the HUD enhancements: a live `/health` backend
  * status pill, a boot-up typewriter reveal, a live character counter and
@@ -579,42 +586,125 @@
     }
   }
 
-  // ----- SSE event handling ----------------------------------------------
+  // ----- Authoritative render from the POST response ----------------------
 
-  /** Dispatch a parsed SSE event payload by its `type`. */
-  function handleEvent(data) {
+  /**
+   * Render the FINAL run state directly from the synchronous `AgentResponse`.
+   *
+   * The `POST /agent` endpoint is synchronous and returns the complete
+   * `AgentResponse` only after the run finishes, so this response is the single
+   * source of truth for the UI. This function renders the timeline,
+   * DONE/FAILED/TOTAL counters, progress bar, assumptions, phase tint, and
+   * result card entirely from that payload — independently of Server-Sent
+   * Events. Counters are computed DIRECTLY from `payload.plan.steps` rather than
+   * from incremental events, so a fully-completed run reliably shows TOTAL=N,
+   * DONE=N, and 100% progress even when the SSE stream delivers nothing.
+   *
+   * @param {Object} payload - The `AgentResponse` returned by `POST /agent`.
+   */
+  function renderFromResponse(payload) {
+    if (!payload) {
+      return;
+    }
+
+    // Identity + assumptions straight from the payload (Req 11.6).
+    setRunId(payload.run_id);
+    renderAssumptions(payload.assumptions);
+
+    // Build the timeline rows and drive each to its FINAL state from the plan.
+    if (payload.plan && payload.plan.steps) {
+      const steps = payload.plan.steps;
+      renderTimeline(steps); // builds rows + sets totalSteps
+
+      steps.forEach(function (step) {
+        // Final state for the row, with output summary (or error) as detail.
+        updateStep(
+          step.step,
+          step.status,
+          step.output_summary || step.error || ""
+        );
+        // Durations are only shown when a client-side start time exists;
+        // the synchronous payload carries none, so this is skipped here.
+        addStepDuration(stepRows.get(Number(step.step)), step.step);
+      });
+
+      // Counters computed DIRECTLY from the plan (never from SSE events).
+      doneCount = steps.filter(function (s) {
+        return s.status === "done";
+      }).length;
+      failedCount = steps.filter(function (s) {
+        return s.status === "failed";
+      }).length;
+      totalSteps = steps.length;
+      // Update the stat cells + progress bar + rail fill from the tallies.
+      refreshProgress();
+    }
+
+    // Final phase tint + result card (Req 11.5, 11.7).
+    finalizePhase(payload.status);
+    renderResult(payload.status, payload.summary, payload.document_url);
+
+    // Ensure the AGENT LOG is never blank even if SSE delivers nothing: append
+    // a concise synthesized summary line when the log is otherwise empty.
+    if (!reasoningOutput.textContent) {
+      const total =
+        payload.plan && payload.plan.steps ? payload.plan.steps.length : 0;
+      log(
+        "Run completed — " +
+          doneCount +
+          "/" +
+          total +
+          " steps, status: " +
+          payload.status +
+          ".",
+        "done"
+      );
+    }
+
+    // Stop the elapsed timer and settle the run.
+    stopElapsedTimer();
+    finishRun();
+  }
+
+  // ----- SSE log-only event handling --------------------------------------
+
+  /**
+   * Append a single color-coded line to the reasoning log for an SSE event.
+   *
+   * This is LOG-ONLY: it MUST NOT call `renderTimeline`, MUST NOT change
+   * `doneCount` / `failedCount` / `totalSteps`, and MUST NOT re-render the
+   * result card. The authoritative timeline, counters, progress, and result are
+   * already rendered from the POST response by `renderFromResponse`, so this
+   * function can never zero-out or double-count that state.
+   *
+   * @param {Object} data - The parsed SSE event payload.
+   */
+  function appendEventLog(data) {
     switch (data.type) {
       case "planning_started":
-        setPhase("PLANNING");
         log("Planning…", "planning");
         break;
       case "plan_created":
-        setPhase("EXECUTING");
-        log("Plan created with " + (data.plan.steps || []).length + " steps.", "planning");
-        renderTimeline(data.plan.steps);
-        renderAssumptions(data.assumptions || (data.plan && data.plan.assumptions));
+        log(
+          "Plan created with " +
+            ((data.plan && data.plan.steps) || []).length +
+            " steps.",
+          "planning"
+        );
         break;
       case "step_started":
-        stepStartTimes.set(Number(data.step), Date.now());
         log("Step " + data.step + " started: " + (data.task || ""), "muted");
-        updateStep(data.step, "running");
         break;
       case "step_completed":
-        doneCount += 1;
-        log("Step " + data.step + " completed: " + (data.output_summary || ""), "done");
-        updateStep(data.step, "done", data.output_summary);
-        addStepDuration(stepRows.get(Number(data.step)), data.step);
-        refreshProgress();
+        log(
+          "Step " + data.step + " completed: " + (data.output_summary || ""),
+          "done"
+        );
         break;
       case "step_failed":
-        failedCount += 1;
         log("Step " + data.step + " FAILED: " + (data.error || ""), "failed");
-        updateStep(data.step, "failed", data.error);
-        addStepDuration(stepRows.get(Number(data.step)), data.step);
-        refreshProgress();
         break;
       case "reflection":
-        setPhase("REFLECTING");
         log("Reflection: " + (data.findings || ""), "reflection");
         if (data.revised_sections && data.revised_sections.length) {
           log("Revised sections: " + data.revised_sections.join(", "), "reflection");
@@ -622,11 +712,6 @@
         break;
       case "run_completed":
         log("Run completed with status: " + data.status, "done");
-        finalizePhase(data.status);
-        renderResult(data.status, data.summary, data.document_url);
-        showToast("Run completed", "Status: " + data.status,
-          data.status === "failed" ? "error" : "success");
-        finishRun();
         break;
       default:
         log("Event: " + data.type, "muted");
@@ -676,15 +761,27 @@
     "run_completed",
   ];
 
-  /** Open the SSE stream for a run and wire up event handling. */
-  function openStream(runId, fallbackResponse) {
+  /**
+   * Open the SSE stream for a run in LOG-ONLY mode.
+   *
+   * The timeline, counters, progress, and result are already rendered
+   * authoritatively from the POST response by `renderFromResponse`, so this
+   * stream exists purely to surface the streamed/replayed reasoning-log lines.
+   * Each parsed event is routed to `appendEventLog`, which only appends a
+   * color-coded log line and never touches the timeline/counters/result. The
+   * `onerror` handler is a deliberate no-op: a stream error or empty stream
+   * cannot regress the already-rendered state.
+   *
+   * @param {string} runId - The run identifier whose event stream to open.
+   */
+  function openLogStream(runId) {
     eventSource = new EventSource("/agent/" + encodeURIComponent(runId) + "/stream");
 
     // Shared dispatch: parse the frame's JSON payload and route it through
-    // handleEvent. Robust to malformed payloads (logs a failed-parse line).
+    // appendEventLog (log-only). Robust to malformed payloads.
     const onEvent = function (evt) {
       try {
-        handleEvent(JSON.parse(evt.data));
+        appendEventLog(JSON.parse(evt.data));
       } catch (err) {
         log("Failed to parse event: " + err, "failed");
       }
@@ -698,23 +795,10 @@
     // Fallback for any unnamed/`message` frames.
     eventSource.onmessage = onEvent;
 
-    eventSource.onerror = function () {
-      // The stream closes after the terminal event; if the run already
-      // finished this is expected. Otherwise fall back to the POST response.
-      if (!runFinished) {
-        if (fallbackResponse) {
-          finalizePhase(fallbackResponse.status);
-          renderResult(
-            fallbackResponse.status,
-            fallbackResponse.summary,
-            fallbackResponse.document_url
-          );
-          showToast("Run completed", "Status: " + fallbackResponse.status,
-            fallbackResponse.status === "failed" ? "error" : "success");
-        }
-        finishRun();
-      }
-    };
+    // No-op: the timeline/result are already rendered from the POST response,
+    // so a stream error (including the expected close after the terminal
+    // event) requires no fallback.
+    eventSource.onerror = function () {};
   }
 
   // ----- Submit flow ------------------------------------------------------
@@ -768,25 +852,20 @@
     }
 
     if (payload.run_id) {
-      setRunId(payload.run_id);
-    }
-
-    // Render assumptions from the response immediately as a fallback; the
-    // plan_created event will refresh them during replay.
-    renderAssumptions(payload.assumptions);
-
-    if (payload.run_id) {
-      openStream(payload.run_id, payload);
-    } else {
-      // No run_id to stream; render directly from the response.
-      if (payload.plan) {
-        renderTimeline(payload.plan.steps);
-      }
-      finalizePhase(payload.status);
-      renderResult(payload.status, payload.summary, payload.document_url);
+      // Authoritative render FIRST from the synchronous response — this fully
+      // populates the timeline, counters, progress, assumptions, and result
+      // card regardless of what the SSE stream later delivers.
+      renderFromResponse(payload);
       showToast("Run completed", "Status: " + payload.status,
         payload.status === "failed" ? "error" : "success");
-      finishRun();
+      // THEN open the SSE stream in log-only mode to surface reasoning-log
+      // lines; it never mutates the authoritative timeline/counters/result.
+      openLogStream(payload.run_id);
+    } else {
+      // No run_id to stream; render directly from the response for consistency.
+      renderFromResponse(payload);
+      showToast("Run completed", "Status: " + payload.status,
+        payload.status === "failed" ? "error" : "success");
     }
   }
 
