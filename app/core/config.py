@@ -34,6 +34,13 @@ class Settings(BaseSettings):
         OLLAMA_MODEL: Ollama model name used for the fallback backend.
         LLM_MAX_RETRIES: Maximum retries per backend before falling back/failing.
         LLM_TIMEOUT_SECONDS: Per-LLM-call timeout in seconds.
+        LLM_CONNECT_TIMEOUT_SECONDS: Fast TCP-connect timeout in seconds. Reads
+            and generation still use ``LLM_TIMEOUT_SECONDS``; this only bounds
+            how long the client waits to establish a connection so unreachable
+            backends fail fast instead of blocking for the full read timeout.
+        LLM_CIRCUIT_BREAKER_COOLDOWN_SECONDS: Once the backends are detected to
+            be down, the service skips the network entirely and uses the offline
+            fallback for this many seconds before probing the network again.
         LLM_OFFLINE_FALLBACK: When ``True``, if every LLM backend is unreachable
             the agent generates deterministic templated content instead of
             failing, so a document is always produced (graceful degradation).
@@ -62,6 +69,8 @@ class Settings(BaseSettings):
     OLLAMA_MODEL: str = "llama3.1"
     LLM_MAX_RETRIES: int = 3
     LLM_TIMEOUT_SECONDS: int = 60
+    LLM_CONNECT_TIMEOUT_SECONDS: int = 5
+    LLM_CIRCUIT_BREAKER_COOLDOWN_SECONDS: int = 30
     LLM_OFFLINE_FALLBACK: bool = True
 
     # --- Server ---
