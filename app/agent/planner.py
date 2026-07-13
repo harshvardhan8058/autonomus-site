@@ -24,6 +24,7 @@ from __future__ import annotations
 from app.core.logging import StructuredLogger
 from app.models.schemas import Plan, RetryAttempt
 from app.services.llm import LLMError, LLMJSONError, LLMService
+from app.services.offline_content import default_plan
 
 _SYSTEM_PROMPT = (
     "You are an autonomous planning agent for a service that produces polished "
@@ -126,6 +127,8 @@ class Planner:
         self,
         llm: LLMService,
         logger: StructuredLogger | None = None,
+        *,
+        enable_offline_fallback: bool = False,
     ) -> None:
         """Initialize the planner.
 
@@ -133,10 +136,16 @@ class Planner:
             llm: The shared :class:`LLMService` used to generate the plan.
             logger: An optional :class:`StructuredLogger` for decision logging.
                 When ``None``, a fresh :class:`StructuredLogger` is created.
+            enable_offline_fallback: When ``True``, a deterministic offline plan
+                is produced (via :func:`app.services.offline_content.default_plan`)
+                if every LLM backend is unreachable, so planning never fails
+                outright. When ``False`` (default), a total backend failure
+                raises :class:`PlanningError` as before.
         """
 
         self._llm = llm
         self._logger = logger if logger is not None else StructuredLogger()
+        self._enable_offline_fallback = enable_offline_fallback
 
     async def make_plan(self, request: str, *, run_id: str | None = None) -> Plan:
         """Produce a strict-JSON :class:`Plan` for ``request`` (Req 2.1-2.6).
@@ -176,8 +185,16 @@ class Planner:
             f"Request:\n{request}"
         )
 
+        offline_fallback = (
+            (lambda: default_plan(request))
+            if self._enable_offline_fallback
+            else None
+        )
+
         try:
-            plan = await self._llm.complete_json(prompt, Plan, system=_SYSTEM_PROMPT)
+            plan = await self._llm.complete_json(
+                prompt, Plan, system=_SYSTEM_PROMPT, offline_fallback=offline_fallback
+            )
         except (LLMJSONError, LLMError) as exc:
             # All retries + JSON repair + Groq -> Ollama fallback have been
             # exhausted by the LLM service. Escalate as a PlanningError carrying

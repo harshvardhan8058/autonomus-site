@@ -359,3 +359,108 @@ def test_repair_json_strips_fences_and_trailing_commas() -> None:
     assert re.match(r"^\{.*\}$", repaired, re.DOTALL)
     assert ",}" not in repaired
     assert "```" not in repaired
+
+
+
+# ---------------------------------------------------------------------------
+# Offline fallback (deterministic degradation when all backends fail)
+# ---------------------------------------------------------------------------
+
+
+async def test_complete_returns_offline_fallback_when_all_backends_fail() -> None:
+    """``complete`` returns the fallback value (no raise) when every backend fails."""
+
+    settings_ = Settings(GROQ_API_KEY="test-key")
+    groq = FakeLLMBackend("groq", always_fail=True)
+    ollama = FakeLLMBackend("ollama", always_fail=True)
+    svc = LLMService(
+        settings_, groq_backend=groq, ollama_backend=ollama, sleep=_noop_sleep
+    )
+
+    result = await svc.complete("prompt", offline_fallback=lambda: "OFFLINE")
+
+    assert result == "OFFLINE"
+
+
+async def test_complete_json_returns_offline_fallback_when_all_backends_fail() -> None:
+    """``complete_json`` returns the fallback instance when every backend fails."""
+
+    settings_ = Settings(GROQ_API_KEY="test-key")
+    groq = FakeLLMBackend("groq", always_fail=True)
+    ollama = FakeLLMBackend("ollama", always_fail=True)
+    svc = LLMService(
+        settings_, groq_backend=groq, ollama_backend=ollama, sleep=_noop_sleep
+    )
+    sentinel = _Target(name="offline", value=0, tags=[])
+
+    result = await svc.complete_json("prompt", _Target, offline_fallback=lambda: sentinel)
+
+    assert result is sentinel
+
+
+async def test_offline_fallback_not_called_when_backend_succeeds() -> None:
+    """A successful backend never invokes the offline fallback."""
+
+    settings_ = Settings(GROQ_API_KEY="test-key")
+    groq = FakeLLMBackend("groq", response="LIVE")
+    ollama = FakeLLMBackend("ollama")
+    svc = LLMService(
+        settings_, groq_backend=groq, ollama_backend=ollama, sleep=_noop_sleep
+    )
+
+    called = False
+
+    def _fallback() -> str:
+        nonlocal called
+        called = True
+        return "OFFLINE"
+
+    result = await svc.complete("prompt", offline_fallback=_fallback)
+
+    assert result == "LIVE"
+    assert called is False
+
+
+async def test_complete_still_raises_without_offline_fallback() -> None:
+    """Without a fallback, total backend failure still raises ``LLMError``."""
+
+    settings_ = Settings(GROQ_API_KEY="test-key")
+    groq = FakeLLMBackend("groq", always_fail=True)
+    ollama = FakeLLMBackend("ollama", always_fail=True)
+    svc = LLMService(
+        settings_, groq_backend=groq, ollama_backend=ollama, sleep=_noop_sleep
+    )
+
+    with pytest.raises(LLMError):
+        await svc.complete("prompt")
+
+
+async def test_complete_json_still_raises_without_offline_fallback() -> None:
+    """Without a fallback, total backend failure still raises ``LLMJSONError``."""
+
+    settings_ = Settings(GROQ_API_KEY="test-key")
+    groq = FakeLLMBackend("groq", always_fail=True)
+    ollama = FakeLLMBackend("ollama", always_fail=True)
+    svc = LLMService(
+        settings_, groq_backend=groq, ollama_backend=ollama, sleep=_noop_sleep
+    )
+
+    with pytest.raises(LLMJSONError):
+        await svc.complete_json("prompt", _Target)
+
+
+async def test_offline_fallback_error_does_not_mask_backend_failure() -> None:
+    """When the fallback itself raises, the original LLM error is surfaced."""
+
+    settings_ = Settings(GROQ_API_KEY="test-key")
+    groq = FakeLLMBackend("groq", always_fail=True)
+    ollama = FakeLLMBackend("ollama", always_fail=True)
+    svc = LLMService(
+        settings_, groq_backend=groq, ollama_backend=ollama, sleep=_noop_sleep
+    )
+
+    def _broken_fallback() -> str:
+        raise ValueError("fallback bug")
+
+    with pytest.raises(LLMError):
+        await svc.complete("prompt", offline_fallback=_broken_fallback)

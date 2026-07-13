@@ -112,11 +112,19 @@ def _build_components(settings: Settings, logger: StructuredLogger) -> dict[str,
     llm_service = LLMService(settings)
 
     doc_builder = DocumentBuilder(settings.THEME_COLOR, logger)
-    registry = build_default_registry(llm_service, doc_builder)
+    registry = build_default_registry(
+        llm_service,
+        doc_builder,
+        enable_offline_fallback=settings.LLM_OFFLINE_FALLBACK,
+    )
 
     executor = Executor(registry, event_bus, logger)
     reflector = Reflector(llm_service, event_bus, logger)
-    planner = Planner(llm_service, logger)
+    planner = Planner(
+        llm_service,
+        logger,
+        enable_offline_fallback=settings.LLM_OFFLINE_FALLBACK,
+    )
     guardrail = GuardrailValidator(llm_service)
     orchestrator = Orchestrator(
         guardrail,

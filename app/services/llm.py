@@ -33,6 +33,7 @@ from pydantic import BaseModel, ValidationError
 from app.core.config import Settings
 
 SchemaT = TypeVar("SchemaT", bound=BaseModel)
+_T = TypeVar("_T")
 
 # Base delay (seconds) for the exponential-backoff schedule. The Nth retry waits
 # ``_BACKOFF_BASE_SECONDS * 2 ** (attempt - 1)`` seconds. The sleep function is
@@ -408,6 +409,7 @@ class LLMService:
         system: str | None = None,
         temperature: float = 0.2,
         max_tokens: int = 2048,
+        offline_fallback: Callable[[], str] | None = None,
     ) -> str:
         """Return a free-form completion with retries and Groq -> Ollama fallback.
 
@@ -415,17 +417,26 @@ class LLMService:
         exponential-backoff attempts; if the primary backend is exhausted, the
         secondary backend is attempted before failing (Req 5.3).
 
+        When every backend fails and ``offline_fallback`` is provided, the
+        callable is invoked and its (already-valid) result is returned instead of
+        raising :class:`LLMError` — the deterministic offline degradation path.
+        When ``offline_fallback`` is ``None`` the method raises exactly as before.
+
         Args:
             prompt: The user prompt.
             system: An optional system instruction.
             temperature: Sampling temperature.
             max_tokens: Maximum tokens to generate.
+            offline_fallback: An optional synchronous callable producing a
+                completion string to return when all backends fail. When
+                ``None`` (default), the method raises on total failure.
 
         Returns:
             The completion text.
 
         Raises:
-            LLMError: If every backend fails after all retries.
+            LLMError: If every backend fails after all retries and no
+                ``offline_fallback`` was provided.
         """
 
         async def call(backend: LLMBackend) -> str:
@@ -439,12 +450,12 @@ class LLMService:
 
         try:
             return await self._run_with_fallback(call)
-        except LLMError:
-            raise
+        except LLMError as exc:
+            return self._apply_offline_fallback(offline_fallback, exc)
         except Exception as exc:  # noqa: BLE001 - normalize to the public error
-            raise LLMError(
-                f"LLM completion failed on all backends: {exc}"
-            ) from exc
+            error = LLMError(f"LLM completion failed on all backends: {exc}")
+            error.__cause__ = exc
+            return self._apply_offline_fallback(offline_fallback, error)
 
     async def complete_json(
         self,
@@ -452,6 +463,7 @@ class LLMService:
         schema: type[SchemaT],
         *,
         system: str | None = None,
+        offline_fallback: Callable[[], SchemaT] | None = None,
     ) -> SchemaT:
         """Return a completion parsed into ``schema``, repairing malformed JSON.
 
@@ -461,18 +473,27 @@ class LLMService:
         backoff/fallback policy. :class:`LLMJSONError` is raised only after
         repair and all retries fail on every backend (Req 2.4, property P6).
 
+        When every backend fails and ``offline_fallback`` is provided, the
+        callable is invoked and its (already-valid) schema instance is returned
+        instead of raising :class:`LLMJSONError` — the deterministic offline
+        degradation path. When ``offline_fallback`` is ``None`` the method raises
+        exactly as before.
+
         Args:
             prompt: The user prompt.
             schema: The Pydantic model the output must validate against.
             system: An optional system instruction; a JSON-only directive is
                 appended so the model is steered toward emitting pure JSON.
+            offline_fallback: An optional synchronous callable producing a valid
+                ``schema`` instance to return when all backends fail. When
+                ``None`` (default), the method raises on total failure.
 
         Returns:
             A validated instance of ``schema``.
 
         Raises:
             LLMJSONError: If no backend yields schema-valid output after repair
-                and retries.
+                and retries and no ``offline_fallback`` was provided.
         """
 
         json_system = self._json_system_prompt(system)
@@ -489,12 +510,46 @@ class LLMService:
 
         try:
             return await self._run_with_fallback(call)
-        except LLMJSONError:
-            raise
+        except LLMJSONError as exc:
+            return self._apply_offline_fallback(offline_fallback, exc)
         except Exception as exc:  # noqa: BLE001 - normalize to the JSON error
-            raise LLMJSONError(
+            error = LLMJSONError(
                 f"failed to obtain schema-valid JSON from any backend: {exc}"
-            ) from exc
+            )
+            error.__cause__ = exc
+            return self._apply_offline_fallback(offline_fallback, error)
+
+    @staticmethod
+    def _apply_offline_fallback(
+        offline_fallback: Callable[[], _T] | None,
+        error: LLMError,
+    ) -> _T:
+        """Return ``offline_fallback()`` on total failure, or re-raise ``error``.
+
+        When no ``offline_fallback`` is provided the original ``error`` is raised
+        unchanged, preserving the historical failure contract. When a fallback is
+        provided it is invoked to produce an already-valid value; if the fallback
+        itself raises, the original LLM ``error`` is raised instead so a genuine
+        backend failure is never masked by a bug in the fallback.
+
+        Args:
+            offline_fallback: The optional synchronous fallback callable.
+            error: The normalized LLM error to raise when no fallback succeeds.
+
+        Returns:
+            The value produced by ``offline_fallback``.
+
+        Raises:
+            LLMError: The original ``error`` when no fallback is provided or the
+                fallback itself raises.
+        """
+
+        if offline_fallback is None:
+            raise error
+        try:
+            return offline_fallback()
+        except Exception:  # noqa: BLE001 - never mask the real backend failure
+            raise error from None
 
     async def health(self) -> tuple[str, bool]:
         """Return ``(backend_name, reachable)`` for the active backend (Req 5.4, 5.6).

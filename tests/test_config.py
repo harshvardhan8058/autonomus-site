@@ -31,6 +31,7 @@ DOCUMENTED_DEFAULTS: dict[str, object] = {
     "OLLAMA_MODEL": "llama3.1",
     "LLM_MAX_RETRIES": 3,
     "LLM_TIMEOUT_SECONDS": 60,
+    "LLM_OFFLINE_FALLBACK": True,
     "HOST": "0.0.0.0",
     "PORT": 8000,
     "RATE_LIMIT_MAX": 10,

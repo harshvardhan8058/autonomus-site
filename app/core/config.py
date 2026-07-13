@@ -34,6 +34,9 @@ class Settings(BaseSettings):
         OLLAMA_MODEL: Ollama model name used for the fallback backend.
         LLM_MAX_RETRIES: Maximum retries per backend before falling back/failing.
         LLM_TIMEOUT_SECONDS: Per-LLM-call timeout in seconds.
+        LLM_OFFLINE_FALLBACK: When ``True``, if every LLM backend is unreachable
+            the agent generates deterministic templated content instead of
+            failing, so a document is always produced (graceful degradation).
         HOST: Server bind host.
         PORT: Server port.
         RATE_LIMIT_MAX: Maximum requests allowed per window per client IP.
@@ -59,6 +62,7 @@ class Settings(BaseSettings):
     OLLAMA_MODEL: str = "llama3.1"
     LLM_MAX_RETRIES: int = 3
     LLM_TIMEOUT_SECONDS: int = 60
+    LLM_OFFLINE_FALLBACK: bool = True
 
     # --- Server ---
     HOST: str = "0.0.0.0"
