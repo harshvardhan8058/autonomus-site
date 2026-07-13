@@ -130,11 +130,17 @@ class PlanStep(BaseModel):
     """A single unit of a :class:`Plan` (Req 2.1).
 
     Attributes:
-        step: 1-based sequential step number (``>= 1``).
+        step: 1-based sequential step number; defaults to ``0`` and is always
+            normalized to its 1-based position by the :class:`Plan` validator,
+            so a missing or arbitrary value never fails validation.
         task: Short task name for the step; the internal action/tool intent that
             the executor routes on (for example ``research`` or ``draft_section``).
-        description: Human-readable description of what the step does.
-        expected_output: Description of the step's expected output.
+            Defaults to empty (the executor routes empty tasks to
+            ``draft_section``).
+        description: Human-readable description of what the step does; defaults
+            to empty so a minor omission never fails validation.
+        expected_output: Description of the step's expected output; defaults to
+            empty so a minor omission never fails validation.
         section_title: Optional, concise, professional, title-case document
             section heading (2-6 words) that appears as the heading of this
             step's section in the rendered Word document. It is distinct from
@@ -147,10 +153,10 @@ class PlanStep(BaseModel):
         depends_on: Step numbers this step depends on before it can execute.
     """
 
-    step: int = Field(ge=1, description="1-based sequential step number")
-    task: str
-    description: str
-    expected_output: str
+    step: int = Field(default=0, ge=0, description="1-based step number (normalized)")
+    task: str = ""
+    description: str = ""
+    expected_output: str = ""
     section_title: str = Field(
         default="",
         description=(
@@ -170,9 +176,9 @@ class PlanStep(BaseModel):
 class Plan(BaseModel):
     """A structured, multi-step plan produced by the Planner (Req 2.1, 2.2).
 
-    A plan contains at least two steps whose numbers are exactly ``1..n`` in
-    order (Req 2.1, property P4), plus any assumptions the Planner made when
-    resolving an ambiguous request (Req 2.3).
+    A plan contains at least two steps; their numbers are normalized to exactly
+    ``1..n`` in list order by the validator (Req 2.1, property P4), plus any
+    assumptions the Planner made when resolving an ambiguous request (Req 2.3).
 
     Attributes:
         steps: The ordered plan steps; at least two are required.
@@ -184,18 +190,19 @@ class Plan(BaseModel):
 
     @model_validator(mode="after")
     def steps_sequential(self) -> Plan:
-        """Enforce that step numbers are exactly ``1, 2, ..., n`` in order.
+        """Normalize step numbers to exactly ``1, 2, ..., n`` in list order.
+
+        Rather than rejecting a plan whose incoming numbering is out of order,
+        duplicated, or missing, this reassigns each step's ``.step`` to its
+        1-based position in the list. This preserves the "sequential ``1..n``"
+        guarantee (property P4) while tolerating real LLM output.
 
         Returns:
-            The validated plan instance.
-
-        Raises:
-            ValueError: If the step numbers are not sequential starting at 1.
+            The validated plan instance with normalized step numbers.
         """
 
-        expected = list(range(1, len(self.steps) + 1))
-        if [s.step for s in self.steps] != expected:
-            raise ValueError("plan step numbers must be sequential starting at 1")
+        for index, step in enumerate(self.steps, start=1):
+            step.step = index
         return self
 
 

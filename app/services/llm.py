@@ -90,14 +90,19 @@ class LLMBackend(Protocol):
         system: str | None,
         temperature: float,
         max_tokens: int,
+        json_mode: bool = False,
     ) -> str:
-        """Produce a free-form completion for ``prompt``.
+        """Produce a completion for ``prompt``.
 
         Args:
             prompt: The user prompt.
             system: An optional system instruction.
             temperature: Sampling temperature.
             max_tokens: Maximum tokens to generate.
+            json_mode: When ``True``, request the backend's native JSON /
+                structured-output mode so the model is constrained to emit a
+                single valid JSON object. When ``False`` (default), a free-form
+                completion is produced.
 
         Returns:
             The completion text.
@@ -160,8 +165,16 @@ class GroqBackend:
         system: str | None,
         temperature: float,
         max_tokens: int,
+        json_mode: bool = False,
     ) -> str:
-        """Produce a completion via the Groq chat-completions API."""
+        """Produce a completion via the Groq chat-completions API.
+
+        When ``json_mode`` is ``True``, ``response_format={"type":
+        "json_object"}`` is passed so Groq constrains the model to emit a single
+        valid JSON object. Groq requires the literal token ``json`` to appear in
+        the messages when this mode is on; the JSON-only system directive built
+        by :meth:`LLMService._json_system_prompt` guarantees this.
+        """
 
         client = self._get_client()
         messages: list[dict[str, str]] = []
@@ -169,11 +182,17 @@ class GroqBackend:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
 
+        kwargs: dict[str, object] = {
+            "model": self._settings.GROQ_MODEL,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        if json_mode:
+            kwargs["response_format"] = {"type": "json_object"}
+
         response = await client.chat.completions.create(  # type: ignore[attr-defined]
-            model=self._settings.GROQ_MODEL,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
+            **kwargs,
         )
         return response.choices[0].message.content or ""
 
@@ -221,8 +240,13 @@ class OllamaBackend:
         system: str | None,
         temperature: float,
         max_tokens: int,
+        json_mode: bool = False,
     ) -> str:
-        """Produce a completion via the Ollama ``/api/generate`` endpoint."""
+        """Produce a completion via the Ollama ``/api/generate`` endpoint.
+
+        When ``json_mode`` is ``True``, ``"format": "json"`` is added to the
+        request payload so Ollama constrains the model to emit valid JSON.
+        """
 
         import httpx
 
@@ -234,6 +258,8 @@ class OllamaBackend:
         }
         if system:
             payload["system"] = system
+        if json_mode:
+            payload["format"] = "json"
 
         async with httpx.AsyncClient(
             timeout=float(self._settings.LLM_TIMEOUT_SECONDS)
@@ -408,6 +434,7 @@ class LLMService:
                 system=system,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                json_mode=False,
             )
 
         try:
@@ -415,7 +442,9 @@ class LLMService:
         except LLMError:
             raise
         except Exception as exc:  # noqa: BLE001 - normalize to the public error
-            raise LLMError("LLM completion failed on all backends") from exc
+            raise LLMError(
+                f"LLM completion failed on all backends: {exc}"
+            ) from exc
 
     async def complete_json(
         self,
@@ -454,6 +483,7 @@ class LLMService:
                 system=json_system,
                 temperature=0.0,
                 max_tokens=2048,
+                json_mode=True,
             )
             return self._parse_json(raw, schema)
 
@@ -463,7 +493,7 @@ class LLMService:
             raise
         except Exception as exc:  # noqa: BLE001 - normalize to the JSON error
             raise LLMJSONError(
-                "failed to obtain schema-valid JSON from any backend"
+                f"failed to obtain schema-valid JSON from any backend: {exc}"
             ) from exc
 
     async def health(self) -> tuple[str, bool]:
@@ -575,7 +605,10 @@ class LLMService:
         try:
             return schema.model_validate_json(repaired)
         except (ValidationError, ValueError) as exc:
-            raise LLMJSONError("model output was not schema-valid JSON") from exc
+            snippet = re.sub(r"\s+", " ", raw).strip()[:200]
+            raise LLMJSONError(
+                f"model output was not schema-valid JSON: {snippet}"
+            ) from exc
 
     def _json_system_prompt(self, system: str | None) -> str:
         """Build the system prompt for JSON-constrained completions.
@@ -589,7 +622,8 @@ class LLMService:
 
         directive = (
             "You must respond with a single valid JSON object only. "
-            "Do not include markdown code fences, commentary, or trailing text."
+            "Do not include markdown code fences, commentary, or trailing text. "
+            "Output json only."
         )
         if system:
             return f"{system}\n\n{directive}"
